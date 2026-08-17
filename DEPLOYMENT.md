@@ -47,6 +47,7 @@ Loopback HTTP/WS is accepted for local development only. The Compose ports bind 
 | `PERSONA_REDIS_HOST`, `PERSONA_REDIS_PORT` | yes | Private Redis endpoint |
 | `PERSONA_REDIS_PASSWORD` | production | Redis authentication secret |
 | `PERSONA_PUBLIC_URL`, `PERSONA_PUBLIC_WS_URL` | yes | Public HTTPS/WSS origins |
+| `PERSONA_SESSION_LIFETIME` | no | Absolute editor-session lifetime (default `8h`); changing it affects newly created sessions |
 | `PERSONA_ACTUATOR_TOKEN` | yes | Random 32+ character bearer token |
 | `PERSONA_QUOTA_*` | no | Per-installation/session request bounds |
 | `PERSONA_PUBLISH_CONFIRMATION_LIFETIME` | no | Lifetime of a single-use in-game publish code (default `5m`) |

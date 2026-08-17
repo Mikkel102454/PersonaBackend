@@ -36,3 +36,8 @@ out/
 ### VS Code ###
 .vscode/
 .env
+
+### Browser test tooling ###
+node_modules/
+test-results/
+playwright-report/

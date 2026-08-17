@@ -11,7 +11,7 @@ import java.util.*;
 
 @Service
 public final class ProjectReferenceService {
-    private static final int MAX_FILES = 1_024;
+    private static final int MAX_FILES = 2_048;
     private static final long MAX_BYTES = 10L * 1_024 * 1_024;
     private static final Map<String, String> REFERENCE_KEYS = Map.of(
             "behavior", "behavior", "shared-behavior", "behavior", "player-behavior", "behavior",

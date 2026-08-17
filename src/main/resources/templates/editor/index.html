@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Persona Editor</title>
+  <link rel="stylesheet" href="/editor/style.css">
+  <script type="module" src="/editor/app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Persona Editor</h1>
+    <p id="status" role="status"></p>
+  </header>
+
+  <section id="connect" class="panel">
+    <h2>Connect to a server</h2>
+    <p>Enter the one-time code shown separately in Minecraft. The editor remains unavailable until the authenticated server connection and signed project snapshot are ready.</p>
+    <form id="verify">
+      <label for="code">Verification code</label>
+      <input id="code" autocomplete="one-time-code" required maxlength="16">
+      <button>Verify browser</button>
+    </form>
+  </section>
+
+  <section id="reconnect" class="panel connection-gate" hidden aria-live="assertive">
+    <h2>Server connection lost</h2>
+    <p>The workspace is locked. Editing resumes only after Persona reconnects and the authoritative project state has been refreshed.</p>
+    <button id="reconnect-now" type="button">Retry now</button>
+  </section>
+
+  <main id="workspace" hidden>
+    <nav id="content-browser" aria-label="Content Browser">
+      <div class="nav-heading">
+        <h2>Content Browser</h2>
+        <div><button id="create-open" type="button" title="Create content (Ctrl/Cmd+N)">Create</button><button id="palette-open" type="button" title="Command palette (Ctrl/Cmd+K)">⌘</button></div>
+      </div>
+      <label class="browser-search" for="content-search">Search project</label>
+      <input id="content-search" type="search" placeholder="ID, title, type, reference, path…" autocomplete="off">
+      <div class="browser-options">
+        <label>Filter<select id="content-filter"><option value="all">All</option><option value="dirty">Dirty</option><option value="clean">Clean</option><option value="invalid">Invalid</option><option value="referenced">Referenced</option><option value="unreferenced">Unreferenced</option><option value="missing">Missing references</option><option value="live">Live / active</option></select></label>
+        <label>Sort<select id="content-sort"><option value="name">Name</option><option value="kind">Kind</option><option value="path">File path</option><option value="recent">Recently opened</option><option value="validation">Validation</option></select></label>
+        <button id="content-density" type="button" aria-pressed="false">Compact</button>
+      </div>
+      <div id="project" aria-label="Project content"></div>
+      <div class="project-actions">
+        <button id="export-all" type="button">Download project</button>
+        <button id="export-changed" type="button" disabled>Download changed</button>
+      </div>
+      <button id="references-open" type="button">References &amp; rename</button>
+      <button id="relationship-map-open" type="button">Relationship Map</button>
+      <button id="semantic-diff-open" type="button">Semantic diff</button>
+      <button id="live-open" type="button" disabled>Live server</button>
+      <button id="publish-request" type="button" disabled>Request publication</button>
+    </nav>
+    <div id="browser-resizer" class="panel-resizer" role="separator" aria-label="Resize Content Browser" aria-orientation="vertical" tabindex="0"></div>
+    <section class="editor">
+      <nav id="resource-tabs" aria-label="Open resources"></nav>
+      <div class="breadcrumb-bar"><button id="browser-toggle" type="button" aria-expanded="true">Hide browser</button><button id="history-back" type="button" aria-label="Back" disabled>←</button><button id="history-forward" type="button" aria-label="Forward" disabled>→</button><nav id="breadcrumbs" aria-label="Breadcrumb"></nav><button id="layout-reset" type="button">Reset layout</button></div>
+      <div class="editor-header">
+        <strong id="file-name">Select a file</strong>
+        <div class="toolbar">
+          <button id="duplicate-resource" type="button" disabled>Duplicate</button>
+          <button id="rename-resource" type="button" disabled>Rename</button>
+          <button id="move-resource" type="button" disabled>Move to safe path</button>
+          <button id="delete-resource" type="button" disabled>Delete</button>
+          <button id="undo" type="button" disabled title="Undo (Ctrl/Cmd+Z)">Undo</button>
+          <button id="redo" type="button" disabled title="Redo (Ctrl/Cmd+Shift+Z)">Redo</button>
+          <button id="copy" type="button" disabled>Copy</button>
+          <button id="paste" type="button" disabled>Paste</button>
+          <button id="diff-toggle" type="button" disabled>Changes</button>
+          <button id="download" type="button" disabled>Download file</button>
+        </div>
+      </div>
+      <div class="split">
+        <section class="visual-pane" aria-label="Visual editor">
+          <div class="mode-heading"><strong>Node graph</strong><span class="view-toggle" role="group" aria-label="Editor view"><button id="view-visual" type="button" aria-pressed="false">Visual</button><button id="view-split" type="button" aria-pressed="true">Split</button><button id="view-yaml" type="button" aria-pressed="false">YAML</button></span><span>Raw YAML remains authoritative.</span></div>
+          <div id="graph-toolbar" role="toolbar" aria-label="Graph viewport">
+            <button id="graph-add" type="button">Add node</button>
+            <button id="graph-copy" type="button">Copy node</button>
+            <button id="graph-paste" type="button">Paste node</button>
+            <button id="graph-fit" type="button">Zoom to fit</button>
+            <button id="graph-reset" type="button">Reset view</button>
+            <button id="graph-auto-layout" type="button">Auto-layout</button>
+            <button id="graph-align-left" type="button">Align left</button>
+            <button id="graph-align-top" type="button">Align top</button>
+            <button id="graph-distribute-horizontal" type="button">Distribute horizontally</button>
+            <button id="graph-distribute-vertical" type="button">Distribute vertically</button>
+            <button id="graph-comment" type="button">Comment</button>
+            <button id="graph-group" type="button">Group</button>
+            <button id="graph-color" type="button">Color label</button>
+            <button id="graph-focus-upstream" type="button">Focus upstream</button>
+            <button id="graph-focus-downstream" type="button">Focus downstream</button>
+            <button id="graph-grid" type="button" aria-pressed="true">Grid</button>
+            <output id="graph-zoom" aria-live="polite">100%</output>
+          </div>
+          <div id="graph-canvas" class="graph-canvas grid" tabindex="0" aria-label="Visual node canvas. Use arrow keys to navigate connected nodes, Control plus arrows to nudge selected nodes, and the viewport controls to pan or zoom.">
+            <div id="graph-plane" class="graph-plane">
+              <svg id="graph-wires" class="graph-wires" aria-label="Node connections"></svg>
+              <div id="graph-nodes" class="graph-nodes"></div>
+            </div>
+            <div id="graph-marquee" hidden></div>
+            <svg id="graph-minimap" class="graph-minimap" aria-label="Graph minimap"></svg>
+            <p id="graph-empty" hidden>No safely representable graph nodes are available. Use the structured fallback or YAML.</p>
+          </div>
+          <div id="graph-stale" hidden role="alert">The YAML is invalid. This is the last valid graph and visual editing is disabled.</div>
+          <form id="visual-tools">
+            <label>Container<select id="visual-container"></select></label>
+            <label>Palette<select id="visual-template"></select></label>
+            <button>Add block</button>
+          </form>
+          <section id="visual-insights">
+            <header><strong id="visual-insights-title">Structure</strong><button id="simulate-open" type="button">Simulate</button></header>
+            <div id="visual-graph"></div>
+            <div id="visual-preview"></div>
+          </section>
+          <details id="structured-fallback"><summary>Structured YAML fallback</summary><div id="visual"></div></details>
+        </section>
+        <div id="source-resizer" class="panel-resizer" role="separator" aria-label="Resize Details panel" aria-orientation="vertical" tabindex="0"></div>
+        <aside id="inspector" class="inspector-pane" aria-label="Details and Inspector"><div class="mode-heading"><strong>Details</strong><span id="inspector-selection">Nothing selected</span></div><div id="inspector-content"><p>Select a node to inspect its source-mapped properties.</p></div></aside>
+      </div>
+      <section id="output-dock" aria-label="Editor output">
+        <div class="output-tabs" role="tablist" aria-label="Output panels"><button type="button" role="tab" aria-selected="true" data-output="yaml">YAML</button><button type="button" role="tab" aria-selected="false" data-output="problems">Problems</button><button type="button" role="tab" aria-selected="false" data-output="references">References</button><button type="button" role="tab" aria-selected="false" data-output="changes">Changes</button><button type="button" role="tab" aria-selected="false" data-output="simulation">Simulation</button><button type="button" role="tab" aria-selected="false" data-output="live">Live</button></div><button id="output-collapse" type="button" aria-expanded="true">Collapse output</button>
+        <section class="source-pane output-panel" data-panel="yaml" aria-label="YAML editor">
+          <div class="mode-heading"><strong>YAML</strong><span>Authoritative source</span></div>
+          <textarea id="source" spellcheck="false" disabled aria-label="YAML source"></textarea>
+          <pre id="diff" hidden aria-label="Textual changes"></pre>
+        </section>
+        <section class="output-panel" data-panel="problems" hidden><p id="yaml-status" role="status"></p><section id="validation-panel" hidden aria-live="polite"><strong id="validation-summary"></strong><ul id="validation-list"></ul></section></section>
+        <section class="output-panel integrated-output" data-panel="references" hidden><p id="references-dock-summary">Typed project references are loaded from the server.</p><button id="references-panel-open" type="button">Refresh references</button><button id="references-tools-open" type="button">Rename tools</button><ul id="references-dock-list"></ul></section>
+        <section class="output-panel integrated-output" data-panel="changes" hidden><p id="semantic-dock-summary">Compare current typed project changes.</p><button id="semantic-panel-open" type="button">Refresh semantic diff</button><ul id="semantic-dock-list"></ul></section>
+        <section class="output-panel integrated-output" data-panel="simulation" hidden><label>Mock flags, variables, quests, memories, and events (JSON)<textarea id="simulation-dock-input">{"flags":{},"variables":{},"quests":{},"memories":{},"events":[]}</textarea></label><button id="simulation-dock-run" type="button">Run deterministic simulation</button><pre id="simulation-dock-output"></pre></section>
+        <section class="output-panel integrated-output" data-panel="live" hidden><p id="live-dock-status">No trusted live subscription.</p><button id="live-dock-subscribe" type="button">Subscribe read only</button><button id="live-dock-expand" type="button">Open live controls</button><ul id="live-dock-list"></ul></section>
+      </section>
+    </section>
+  </main>
+
+  <dialog id="palette"><form method="dialog"><label for="palette-search">Command palette</label><input id="palette-search" autocomplete="off" placeholder="Search commands…"><ul id="palette-results"></ul><button value="cancel" class="visually-hidden">Close</button></form></dialog>
+  <dialog id="quick-open"><form method="dialog"><label for="quick-open-search">Quick open</label><input id="quick-open-search" autocomplete="off" placeholder="Find a resource…"><ul id="quick-open-results"></ul><button value="cancel" class="visually-hidden">Close</button></form></dialog>
+  <dialog id="create-dialog"><form id="create-form"><header><h2>Create Persona content</h2><button id="create-close" type="button">Close</button></header><label>Content kind<select id="create-kind"><option value="npc">NPC</option><option value="dialogue">Dialogue</option><option value="quest">Quest</option><option value="behavior">Behaviour</option><option value="script">Reusable script</option></select></label><label>Namespaced ID<input id="create-id" required autocomplete="off" placeholder="village:guide" pattern="[a-z0-9][a-z0-9_.-]{0,62}:[a-z0-9][a-z0-9_.-]{0,62}"></label><label>Safe file path<input id="create-path" readonly></label><label>Template<select id="create-template"><option value="minimal">Minimal valid content</option></select></label><label>Initial authoritative YAML<textarea id="create-preview" readonly spellcheck="false"></textarea></label><p id="create-error" role="alert"></p><button id="create-submit" type="submit" disabled>Create and open</button></form></dialog>
+  <dialog id="references-dialog"><section><header><h2>Project references</h2><button id="references-close" type="button">Close</button></header><p id="references-summary"></p><ul id="references-list"></ul><form id="rename-preview-form"><h3>Safe rename preview</h3><label>Content type<select id="rename-type"><option>behavior</option><option>npc</option><option>dialogue</option><option>quest</option><option>script</option></select></label><label>Current ID<input id="rename-current" required></label><label>Replacement ID<input id="rename-replacement" required></label><button>Preview impact</button></form><div id="rename-result" aria-live="polite"></div></section></dialog>
+  <dialog id="semantic-diff-dialog"><section><header><h2>Semantic project diff</h2><button id="semantic-diff-close" type="button">Close</button></header><p id="semantic-diff-summary"></p><ul id="semantic-diff-list"></ul></section></dialog>
+  <dialog id="live-dialog"><section><header><h2>Live server <span id="live-mode">— read only</span></h2><button id="live-close" type="button">Close</button></header><p id="live-status">Not subscribed.</p><div id="live-content"><section><h3>Players</h3><ul id="live-players"></ul></section><section><h3>NPC presentations</h3><ul id="live-npcs"></ul></section><section><h3>Behavior runtimes</h3><ul id="live-behaviors"></ul></section><section><h3>Quests</h3><ul id="live-quests"></ul></section><section><h3>Dialogues</h3><ul id="live-dialogues"></ul></section><section><h3>Memories</h3><ul id="live-memories"></ul></section><section><h3>Server</h3><pre id="live-server"></pre></section><section id="live-controls" hidden><h3>Elevated live controls</h3><form id="behavior-mutation-form"><label>Runtime<select id="behavior-mutation-target" required></select></label><label>Operation<select id="behavior-mutation-operation"><option>PAUSE</option><option>RESUME</option><option>RESTART</option><option>WAKE</option><option>SIGNAL</option></select></label><label>Signal name<input id="behavior-mutation-signal" pattern="[a-z0-9][a-z0-9_.:-]{0,63}"></label><button>Review behavior mutation</button></form><form id="memory-mutation-form"><label>Memory<select id="memory-mutation-target" required></select></label><label>Operation<select id="memory-mutation-operation"><option>SET</option><option>INCREMENT</option><option>EXPIRE</option><option>DELETE</option></select></label><label>Type<select id="memory-mutation-type"><option>STRING</option><option>NUMBER</option><option>BOOLEAN</option><option>TIMESTAMP</option></select></label><label>Value / increment<input id="memory-mutation-value"></label><label>Expiry<input id="memory-mutation-expiry" type="datetime-local"></label><button>Review memory mutation</button></form><p id="mutation-result" role="status"></p></section></div></section></dialog>
+  <dialog id="mutation-confirm"><form method="dialog"><h2>Confirm live mutation</h2><pre id="mutation-confirm-details"></pre><p>This changes live server state immediately.</p><button value="cancel">Cancel</button><button id="mutation-confirm-apply" value="apply">Apply mutation</button></form></dialog>
+  <dialog id="simulation-dialog"><section><header><h2>Deterministic preview</h2><button id="simulation-close" type="button">Close</button></header><label>Mock flags, variables, quests, memories, and events (JSON)<textarea id="simulation-input">{"flags":{},"variables":{},"quests":{},"memories":{},"events":[]}</textarea></label><button id="simulation-run" type="button">Run simulation</button><pre id="simulation-output"></pre></section></dialog>
+</body>
+</html>

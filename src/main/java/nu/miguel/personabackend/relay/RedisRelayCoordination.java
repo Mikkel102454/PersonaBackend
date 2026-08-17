@@ -44,6 +44,9 @@ public final class RedisRelayCoordination implements RelayCoordination, SmartLif
         state.put(presenceKey(role, id), node, ttl);
     }
     @Override public void disconnected(RelaySocketHandler.Role role, UUID id) { state.delete(presenceKey(role, id)); }
+    @Override public boolean isConnected(RelaySocketHandler.Role role, UUID id) {
+        return state.get(presenceKey(role, id)).isPresent();
+    }
     private void receive(String encoded) {
         try {
             Forwarded value = json.readValue(encoded, Forwarded.class);
@@ -51,7 +54,7 @@ public final class RedisRelayCoordination implements RelayCoordination, SmartLif
         } catch (Exception ignored) { /* Redis channel is private; malformed coordination data is discarded. */ }
     }
     private String presenceKey(RelaySocketHandler.Role role, UUID id) {
-        return "presence:" + node + ':' + role.name().toLowerCase() + ':' + id;
+        return "presence:" + role.name().toLowerCase() + ':' + id;
     }
     @Override public void start() { if (!running) { listeners.afterPropertiesSet(); listeners.start(); running = true; } }
     @Override public void stop() { if (running) { listeners.stop(); running = false; } }

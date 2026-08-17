@@ -10,4 +10,5 @@ public interface RelayCoordination {
     void forward(RelaySocketHandler.Role sourceRole, UUID sessionId, String payload);
     void connected(RelaySocketHandler.Role role, UUID sessionId, Duration ttl);
     void disconnected(RelaySocketHandler.Role role, UUID sessionId);
+    boolean isConnected(RelaySocketHandler.Role role, UUID sessionId);
 }

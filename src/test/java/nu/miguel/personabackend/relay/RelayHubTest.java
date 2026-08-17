@@ -82,6 +82,54 @@ class RelayHubTest {
         assertTrue(pluginMessages.isEmpty());
     }
 
+    @Test void sharesBoundedConnectionPresenceAcrossBackendInstances() throws Exception {
+        InMemoryRelayCoordination.Bus bus = new InMemoryRelayCoordination.Bus();
+        RelayCapacityProperties capacity = new RelayCapacityProperties(1_000, 65_536, Duration.ofMillis(80));
+        RelayHub pluginNode = new RelayHub(json, properties, new InMemoryRelayCoordination(bus), capacity);
+        RelayHub pageNode = new RelayHub(json, properties, new InMemoryRelayCoordination(bus), capacity);
+        var id = java.util.UUID.randomUUID();
+        WebSocketSession plugin = socket("plugin-presence", new ArrayList<>());
+
+        assertFalse(pageNode.connected(RelaySocketHandler.Role.PLUGIN, id));
+        pluginNode.register(RelaySocketHandler.Role.PLUGIN, id, plugin, 0);
+        assertTrue(pageNode.connected(RelaySocketHandler.Role.PLUGIN, id));
+        pluginNode.unregister(RelaySocketHandler.Role.PLUGIN, id, plugin);
+        assertFalse(pageNode.connected(RelaySocketHandler.Role.PLUGIN, id));
+
+        InMemoryRelayCoordination first = new InMemoryRelayCoordination(bus);
+        InMemoryRelayCoordination second = new InMemoryRelayCoordination(bus);
+        first.connected(RelaySocketHandler.Role.PLUGIN, id, Duration.ofMillis(20));
+        assertTrue(second.isConnected(RelaySocketHandler.Role.PLUGIN, id));
+        Thread.sleep(40);
+        assertFalse(second.isConnected(RelaySocketHandler.Role.PLUGIN, id));
+    }
+
+    @Test void pluginDisconnectImmediatelyClosesLocalAndRemoteBrowserSockets() throws Exception {
+        InMemoryRelayCoordination.Bus bus = new InMemoryRelayCoordination.Bus();
+        RelayCapacityProperties capacity = new RelayCapacityProperties(1_000, 65_536, Duration.ofSeconds(30));
+        RelayHub pluginNode = new RelayHub(json, properties, new InMemoryRelayCoordination(bus), capacity);
+        RelayHub remoteBrowserNode = new RelayHub(json, properties, new InMemoryRelayCoordination(bus), capacity);
+        var remoteId = java.util.UUID.randomUUID();
+        WebSocketSession plugin = socket("plugin-disconnect", new ArrayList<>());
+        WebSocketSession remoteBrowser = socket("remote-browser", new ArrayList<>());
+        pluginNode.register(RelaySocketHandler.Role.PLUGIN, remoteId, plugin, 0);
+        remoteBrowserNode.register(RelaySocketHandler.Role.BROWSER, remoteId, remoteBrowser, 0);
+
+        pluginNode.unregister(RelaySocketHandler.Role.PLUGIN, remoteId, plugin);
+
+        verify(remoteBrowser).close(argThat(status -> status.getCode() == CloseStatus.SERVICE_RESTARTED.getCode()));
+        assertFalse(remoteBrowserNode.connected(RelaySocketHandler.Role.BROWSER, remoteId));
+
+        RelayHub localHub = new RelayHub(json, properties, new InMemoryRelayCoordination(bus), capacity);
+        var localId = java.util.UUID.randomUUID();
+        WebSocketSession localPlugin = socket("local-plugin", new ArrayList<>());
+        WebSocketSession localBrowser = socket("local-browser", new ArrayList<>());
+        localHub.register(RelaySocketHandler.Role.PLUGIN, localId, localPlugin, 0);
+        localHub.register(RelaySocketHandler.Role.BROWSER, localId, localBrowser, 0);
+        localHub.unregister(RelaySocketHandler.Role.PLUGIN, localId, localPlugin);
+        verify(localBrowser).close(argThat(status -> status.getCode() == CloseStatus.SERVICE_RESTARTED.getCode()));
+    }
+
     private WebSocketSession socket(String id, List<WebSocketMessage<?>> messages) throws Exception {
         WebSocketSession socket = mock(WebSocketSession.class);
         when(socket.getId()).thenReturn(id);

@@ -19,7 +19,7 @@ public record EditorProperties(
     public EditorProperties {
         if (publicUrl == null || publicUrl.isBlank()) publicUrl = "http://localhost:8080";
         if (publicWebSocketUrl == null || publicWebSocketUrl.isBlank()) publicWebSocketUrl = "ws://localhost:8080";
-        if (sessionLifetime == null) sessionLifetime = Duration.ofMinutes(5);
+        if (sessionLifetime == null) sessionLifetime = Duration.ofHours(8);
         if (requestClockSkew == null) requestClockSkew = Duration.ofMinutes(1);
         if (maximumVerificationAttempts < 1) maximumVerificationAttempts = 5;
         if (socketIdleTimeout == null || socketIdleTimeout.isNegative() || socketIdleTimeout.isZero())

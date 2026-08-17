@@ -34,6 +34,9 @@ public final class SessionController {
     @PostMapping("/{sessionId}/verify")
     public SessionVerifyResponse verify(@PathVariable UUID sessionId,
                                         @Valid @RequestBody SessionVerifyRequest request) {
+        if (!relay.connected(nu.miguel.personabackend.relay.RelaySocketHandler.Role.PLUGIN, sessionId))
+            throw new ResponseStatusException(HttpStatus.SERVICE_UNAVAILABLE,
+                    "The Persona server is not connected to this editor session");
         return sessions.verify(sessionId, request);
     }
 

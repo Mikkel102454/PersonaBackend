@@ -3,6 +3,8 @@ package nu.miguel.personabackend.security;
 import nu.miguel.persona.editor.protocol.Capability;
 import nu.miguel.personabackend.session.EditorSession;
 import nu.miguel.personabackend.session.SessionService;
+import nu.miguel.personabackend.relay.RelayHub;
+import nu.miguel.personabackend.relay.RelaySocketHandler;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.mock.web.MockHttpServletRequest;
@@ -69,6 +71,33 @@ class EditorLeaseAuthenticationFilterTest {
         assertEquals(401, response.getStatus());
         assertFalse(invoked[0]);
         verify(sessions, never()).authenticatePlugin(any(), any());
+    }
+
+    @Test void rejectsEveryBrowserApiWhenPersonaPluginIsDisconnected() throws Exception {
+        UUID id = UUID.randomUUID();
+        SessionService sessions = mock(SessionService.class);
+        RelayHub relay = mock(RelayHub.class);
+        EditorSession editor = mock(EditorSession.class);
+        when(editor.id()).thenReturn(id);
+        when(editor.installationId()).thenReturn(UUID.randomUUID());
+        when(editor.capabilities()).thenReturn(Set.of(Capability.CONTENT_VIEW, Capability.DRAFT_EDIT));
+        when(sessions.authenticateBrowser(id, "browser")).thenReturn(editor);
+        EditorLeaseAuthenticationFilter filter = new EditorLeaseAuthenticationFilter(sessions, relay);
+        for (String path : java.util.List.of(
+                "/api/v1/editor/sessions/" + id + "/snapshot",
+                "/api/v1/editor/sessions/" + id + "/documents/parse",
+                "/api/v1/editor/sessions/" + id + "/projects/create",
+                "/api/v1/editor/sessions/" + id + "/projects/extract-script",
+                "/api/v1/editor/sessions/" + id + "/projects/create-and-assign",
+                "/api/v1/editor/sessions/" + id + "/export")) {
+            MockHttpServletResponse response = new MockHttpServletResponse();
+            boolean[] invoked = {false};
+            filter.doFilter(request(path.endsWith("snapshot") ? "GET" : "POST", path, "browser"),
+                    response, (ignoredRequest, ignoredResponse) -> invoked[0] = true);
+            assertEquals(503, response.getStatus(), path);
+            assertFalse(invoked[0], path);
+        }
+        verify(relay, times(6)).connected(RelaySocketHandler.Role.PLUGIN, id);
     }
 
     @Test void separatesBrowserPublishRequestFromPluginConfirmationAndResult() throws Exception {

@@ -7,6 +7,7 @@ import org.junit.jupiter.params.provider.MethodSource;
 import org.springframework.web.server.ResponseStatusException;
 
 import static org.junit.jupiter.api.Assertions.*;
+import java.util.Random;
 import java.util.stream.Stream;
 
 class YamlDocumentServiceTest {
@@ -57,6 +58,11 @@ class YamlDocumentServiceTest {
         assertThrows(ResponseStatusException.class, () -> documents.edit(
                 new YamlEditRequest("root: [unterminated\n", "/root", "x")));
         assertThrows(ResponseStatusException.class, () -> documents.parse("x".repeat(YamlDocumentService.MAX_DOCUMENT_BYTES + 1)));
+
+        String deeplyNested = "value: " + "[".repeat(110) + "1" + "]".repeat(110) + "\n";
+        YamlDocumentResponse nested = documents.parse(deeplyNested);
+        assertFalse(nested.valid());
+        assertTrue(nested.diagnostics().stream().anyMatch(issue -> issue.message().toLowerCase().contains("nest")));
     }
 
     @Test void canonicalizesTypedScalarValuesWithoutChangingSurroundingYaml() {
@@ -91,6 +97,22 @@ class YamlDocumentServiceTest {
         assertTrue(edited.content().contains("x-future: &future {kept: true}"), family);
         assertTrue(edited.content().contains("future-copy: *future"), family);
         assertEquals(replacement, find(edited.root(), path).value(), family);
+    }
+
+    @Test void propertyChecksTenThousandBoundedScalarPatchesAgainstLosslessSentinels() {
+        String source = "# property header\nroot:\n  a/b: old # inline retained\n\n"
+                + "anchor: &kept !vendor tagged\nalias: *kept\nunknown: { order: retained }\n";
+        Random random = new Random(0x5eedL);
+        for (int iteration = 0; iteration < 10_000; iteration++) {
+            String replacement = "v-" + iteration + "-" + Integer.toUnsignedString(random.nextInt(), 36)
+                    + (iteration % 97 == 0 ? " quoted ' value" : "");
+            YamlDocumentResponse result = documents.edit(new YamlEditRequest(source, "/root/a~1b", replacement));
+            assertTrue(result.valid(), "iteration " + iteration);
+            assertEquals(replacement, find(result.root(), "/root/a~1b").value(), "iteration " + iteration);
+            assertTrue(result.content().startsWith("# property header\nroot:\n  a/b: "), "iteration " + iteration);
+            assertTrue(result.content().contains(" # inline retained\n\nanchor: &kept !vendor tagged\n"
+                    + "alias: *kept\nunknown: { order: retained }\n"), "iteration " + iteration);
+        }
     }
 
     private static Stream<Arguments> contentFixtures() {

@@ -7,6 +7,9 @@ import jakarta.servlet.http.HttpServletResponse;
 import nu.miguel.persona.editor.protocol.Capability;
 import nu.miguel.personabackend.session.EditorSession;
 import nu.miguel.personabackend.session.SessionService;
+import nu.miguel.personabackend.relay.RelayHub;
+import nu.miguel.personabackend.relay.RelaySocketHandler;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
 import org.springframework.security.core.authority.SimpleGrantedAuthority;
@@ -21,8 +24,14 @@ import java.util.*;
 @Component
 public final class EditorLeaseAuthenticationFilter extends OncePerRequestFilter {
     private final SessionService sessions;
+    private final RelayHub relay;
 
-    public EditorLeaseAuthenticationFilter(SessionService sessions) { this.sessions = sessions; }
+    public EditorLeaseAuthenticationFilter(SessionService sessions) { this(sessions, null); }
+    @Autowired
+    public EditorLeaseAuthenticationFilter(SessionService sessions, RelayHub relay) {
+        this.sessions = sessions;
+        this.relay = relay;
+    }
 
     @Override protected boolean shouldNotFilter(HttpServletRequest request) {
         String path = request.getRequestURI();
@@ -52,6 +61,10 @@ public final class EditorLeaseAuthenticationFilter extends OncePerRequestFilter 
                     session = sessions.authenticateBrowser(sessionId, lease); actual = EditorPrincipal.Role.BROWSER;
                 }
             }
+            if (actual == EditorPrincipal.Role.BROWSER && relay != null
+                    && !relay.connected(RelaySocketHandler.Role.PLUGIN, sessionId))
+                throw new ResponseStatusException(org.springframework.http.HttpStatus.SERVICE_UNAVAILABLE,
+                        "The Persona server is not connected");
             EditorPrincipal principal = new EditorPrincipal(session.id(), session.installationId(), actual,
                     session.capabilities());
             List<SimpleGrantedAuthority> authorities = new ArrayList<>();
@@ -83,6 +96,8 @@ public final class EditorLeaseAuthenticationFilter extends OncePerRequestFilter 
         if (path.matches(".*/publishes/[^/]+/rollback-(project|result)$"))
             return RequiredRole.PLUGIN;
         if (path.equals("/ws/v1/browser") || path.contains("/drafts") || path.contains("/publishes")
+                || path.contains("/documents/") || path.contains("/projects/")
+                || path.endsWith("/import") || path.endsWith("/export")
                 || (path.endsWith("/snapshot") || path.endsWith("/metadata")) && method.equals("GET"))
             return RequiredRole.BROWSER;
         return RequiredRole.EITHER;

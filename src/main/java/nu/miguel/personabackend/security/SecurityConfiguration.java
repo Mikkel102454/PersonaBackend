@@ -24,9 +24,7 @@ public class SecurityConfiguration {
                 .addFilterBefore(leases, AnonymousAuthenticationFilter.class)
                 .addFilterBefore(administration, AnonymousAuthenticationFilter.class)
                 .authorizeHttpRequests(authorize -> authorize
-                        .requestMatchers("/editor/**", "/api/v1/editor/import", "/api/v1/editor/export",
-                                "/api/v1/editor/documents/**", "/error").permitAll()
-                        .requestMatchers("/api/v1/editor/projects/**").permitAll()
+                        .requestMatchers("/editor/**", "/error").permitAll()
                         .requestMatchers("/actuator/**").hasRole("ADMIN")
                         .requestMatchers(HttpMethod.POST, "/api/v1/editor/sessions", "/api/v1/editor/sessions/installation-challenges", "/api/v1/editor/sessions/installation-challenges/prove").permitAll()
                         .requestMatchers(HttpMethod.POST, "/api/v1/editor/sessions/*/verify").permitAll()
@@ -42,6 +40,19 @@ public class SecurityConfiguration {
                         .requestMatchers("/api/v1/editor/sessions/*/publishes/*/rollback-*").hasRole("PLUGIN")
                         .requestMatchers(HttpMethod.GET, "/api/v1/editor/sessions/*/snapshot").hasAuthority("CAP_CONTENT_VIEW")
                         .requestMatchers(HttpMethod.GET, "/api/v1/editor/sessions/*/metadata").hasAuthority("CAP_CONTENT_VIEW")
+                        .requestMatchers(HttpMethod.POST, "/api/v1/editor/sessions/*/documents/parse").hasAuthority("CAP_CONTENT_VIEW")
+                        .requestMatchers(HttpMethod.POST, "/api/v1/editor/sessions/*/documents/projection").hasAuthority("CAP_CONTENT_VIEW")
+                        .requestMatchers("/api/v1/editor/sessions/*/documents/**").hasAuthority("CAP_DRAFT_EDIT")
+                        .requestMatchers(HttpMethod.POST, "/api/v1/editor/sessions/*/projects/create",
+                                "/api/v1/editor/sessions/*/projects/duplicate",
+                                "/api/v1/editor/sessions/*/projects/rename",
+                                "/api/v1/editor/sessions/*/projects/move",
+                                "/api/v1/editor/sessions/*/projects/extract-script",
+                                "/api/v1/editor/sessions/*/projects/create-and-assign",
+                                "/api/v1/editor/sessions/*/projects/delete").hasAuthority("CAP_DRAFT_EDIT")
+                        .requestMatchers("/api/v1/editor/sessions/*/projects/**").hasAuthority("CAP_CONTENT_VIEW")
+                        .requestMatchers("/api/v1/editor/sessions/*/export").hasAuthority("CAP_CONTENT_VIEW")
+                        .requestMatchers("/api/v1/editor/sessions/*/import").hasAuthority("CAP_DRAFT_EDIT")
                         .requestMatchers("/api/v1/editor/sessions/*/drafts/**").hasAuthority("CAP_DRAFT_EDIT")
                         .requestMatchers("/api/v1/editor/sessions/*/publishes/**").hasAuthority("CAP_CONTENT_PUBLISH")
                         .requestMatchers(HttpMethod.POST, "/api/v1/editor/sessions/*/publishes").hasAuthority("CAP_CONTENT_PUBLISH")

@@ -8,7 +8,7 @@ modules.
 
 ## Boundary
 
-- Spring Boot owns authentication, session leases, bounded ZIP/YAML ingestion,
+- Spring Boot owns authentication, session leases, bounded session-scoped ZIP/YAML ingestion,
   durable draft and revision APIs, validation orchestration, publishing, and relay
   policy.
 - Browser modules own project navigation, raw and visual editing state, local undo and
@@ -19,9 +19,18 @@ modules.
 - The hosted relay and browser are not trusted to assert Minecraft state. A browser
   verifies server snapshot signatures before loading files into the workspace.
 
-Offline imports use a sessionless, bounded endpoint. They create only an in-browser
-project response and do not create a Persona session, installation identity, lease,
-WebSocket connection, or access to a Minecraft server.
+There is deliberately no offline editor or sessionless project endpoint. The page
+route is available only while the matching Persona plugin relay is present. Browser
+verification, every browser HTTP request, and the WebSocket handshake recheck that
+presence. Losing the plugin socket closes the browser relay locally or across backend
+instances; the workspace becomes inert immediately and is not revealed again until a
+new signed authoritative snapshot and editor metadata have been verified.
+
+Project import, export, parsing, reference analysis, semantic diff, templates, and
+project lifecycle operations are all scoped beneath an authenticated session URL.
+Create, duplicate, atomic rename, and guarded delete accept a digest-verified bounded
+raw-YAML candidate and return byte-preserving patches/candidate files for the existing
+draft, validation, semantic-diff, export, publication, recovery, and undo flows.
 
 ## Lossless document workspace
 

@@ -168,6 +168,13 @@ class SessionServiceTest {
                 Duration.ofSeconds(45), 16));
     }
 
+    @Test void defaultsEditorSessionsToEightHours() {
+        EditorProperties defaults = new EditorProperties(
+                "http://localhost:8080", "ws://localhost:8080", null, null, 0, null, 0);
+
+        assertEquals(Duration.ofHours(8), defaults.sessionLifetime());
+    }
+
     @Test void absoluteExpiryRemovesSessionEvenWithoutAuthenticationActivity() throws Exception {
         SessionService service = new SessionService(new EditorProperties(
                 "https://editor.example", "wss://editor.example", Duration.ZERO, Duration.ofMinutes(1), 3,
