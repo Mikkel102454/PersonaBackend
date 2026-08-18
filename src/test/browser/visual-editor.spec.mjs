@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test';
+
+async function nodeMenuAction(node,label){await node.getByRole('button',{name:/^Actions for /}).click();await node.getByRole('menuitem',{name:label,exact:true}).click();}
 import AxeBuilder from '@axe-core/playwright';
 
 const sessionPath = '/editor/session/11111111-1111-4111-8111-111111111111';
@@ -57,6 +59,7 @@ async function connect(page) {
   await page.getByLabel('Verification code').fill('ABC123');
   await page.getByRole('button', { name: 'Verify browser' }).click();
   await expect(page.locator('#workspace')).toBeVisible();
+  if (await page.locator('#content-browser').isHidden()) await page.locator('#browser-toggle').click();
   await page.locator('#project').getByText('demo:walker', { exact: true }).click();
   await expect(page.locator('.graph-node-card')).toHaveCount(3);
 }
@@ -111,6 +114,51 @@ test('opens only after authentication and renders accessible nodes, pins, and wi
   await expect(page.locator('#quick-open')).toBeHidden();
 });
 
+test('keeps Inspector ports, textual connections, source ranges, and graph state synchronized', async ({ page }) => {
+  await connect(page);
+  const root = page.getByRole('group', { name: /root, sequence/ });
+  await root.click();
+  await expect(root).toHaveAccessibleName(/selected, not live, editable/);
+  await expect(page.locator('#inspector-content').getByRole('heading', { name: 'Ports' })).toBeVisible();
+  await expect(page.locator('#inspector-content').getByRole('heading', { name: 'Connections' })).toBeVisible();
+  await expect(page.locator('#inspector-content').getByRole('button', { name: /To wait-one via 1/ })).toBeVisible();
+  await expect(root.getByRole('button', { name: /output pin 1.*1 current connection/ })).toBeVisible();
+  await page.locator('#inspector-content').getByRole('button', { name: /To wait-one via 1/ }).click();
+  await expect(page.getByRole('group', { name: /wait-one, wait/ })).toBeFocused();
+});
+
+test('provides complete local alignment, snap, tidy, focus, and one-pixel keyboard layout commands', async ({ page }) => {
+  await connect(page);
+  const root = page.getByRole('group', { name: /root, sequence/ });
+  const wait = page.getByRole('group', { name: /wait-one, wait/ });
+  await root.click(); await wait.click({ modifiers: ['Control'] });
+  await page.getByRole('button', { name: 'Align middle' }).click();
+  const middle = await Promise.all([root, wait].map(node => node.evaluate(element => element.style.transform)));
+  expect(middle[0]).not.toBe(''); expect(middle[1]).not.toBe('');
+  await page.getByRole('button', { name: 'Snap selection' }).click();
+  await page.getByRole('button', { name: 'Tidy selection' }).click();
+  await root.focus(); const before = await root.getAttribute('style');
+  await page.keyboard.press('Control+ArrowRight');
+  await expect.poll(() => root.getAttribute('style')).not.toBe(before);
+  await page.keyboard.press('Control+Shift+ArrowDown');
+  await page.getByRole('button', { name: 'Focus connected' }).click();
+  await expect(page.getByRole('group', { name: /Custom YAML/ })).toHaveClass(/graph-dimmed/);
+  await page.locator('#graph-canvas').focus(); await page.keyboard.press('Escape');
+  await expect(page.getByRole('group', { name: /Custom YAML/ })).not.toHaveClass(/graph-dimmed/);
+});
+
+test('supports accessible resource-tab close-others and reopen workflows', async ({ page }) => {
+  await connect(page);
+  await page.locator('#project').getByText('demo:target', { exact: true }).click();
+  const target = page.locator('.tab-open', { hasText: 'demo:target' });
+  await target.click({ button: 'right' });
+  await expect(page.getByRole('menu')).toBeVisible();
+  await page.getByRole('menuitem', { name: 'Close others' }).click();
+  await expect(page.locator('.resource-tab')).toHaveCount(1);
+  await page.keyboard.press('Control+Shift+t');
+  await expect(page.locator('.resource-tab')).toHaveCount(2);
+});
+
 test('supports canvas zoom, node movement, selection synchronization, and keyboard traversal', async ({ page }) => {
   await connect(page);
   const plane = page.locator('#graph-plane');
@@ -147,7 +195,10 @@ test('inserts through the digest-checked graph palette and preserves custom YAML
   await connect(page);
   await page.getByRole('button', { name: 'Add node' }).click();
   await expect(page.getByRole('dialog').filter({ has: page.getByLabel('Add graph node') })).toBeVisible();
-  await page.locator('#palette-search').fill('wait');
+  const search = page.locator('#palette-search');
+  await search.pressSequentially('wait');
+  await expect(search).toBeFocused();
+  await expect(search).toHaveValue('wait');
   page.once('dialog', dialog => dialog.accept('wait-two'));
   await page.locator('#palette-results').getByRole('button', { name: 'Wait', exact: true }).click();
 
@@ -156,6 +207,19 @@ test('inserts through the digest-checked graph palette and preserves custom YAML
   await expect(page.locator('#source')).toHaveValue(/future: !vendor retained/);
   await expect(page.locator('#yaml-status')).toContainText('authoritative operation');
   await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled();
+});
+
+test('reorders behavior children visually through stable neighboring ports', async ({ page }) => {
+  await connect(page);
+  page.once('dialog', dialog => dialog.accept('second'));
+  await page.getByRole('button', { name: 'Add node' }).click();
+  await page.getByRole('dialog').getByRole('button', { name: 'Wait' }).click();
+  const second = page.getByRole('group', { name: /second, wait/ }); await expect(second).toBeVisible();
+  await nodeMenuAction(second, 'Move earlier');
+  await expect.poll(async () => {
+    const value = await page.locator('#source').inputValue();
+    return value.indexOf('id: second') < value.indexOf('id: wait-one');
+  }).toBe(true);
 });
 
 test('discovers signed extension nodes in the shared palette and applies a narrow authoritative patch', async ({ page }) => {
@@ -204,17 +268,16 @@ test('extracts a dialogue command to a reusable script and opens the new authori
   await createResource(page, 'dialogue', 'demo:extract-source');
   const say = page.getByRole('group', { name: /New dialogue line, script-say/ });
   page.once('dialog', dialog => dialog.accept('extracted-line'));
-  await say.getByRole('button', { name: 'Extract to reusable script' }).click();
+  await nodeMenuAction(say, 'Extract to reusable script');
   await expect(page.locator('.tab-open', { hasText: 'extracted-line' })).toHaveAttribute('aria-current', 'page');
-  await expect(page.locator('#source')).toHaveValue(/extracted-line:\n    - type: say\n      text: "New dialogue line"/);
+  await expect(page.locator('#source')).toHaveValue(/extracted-line:\n    inputs: \{\}\n    outputs: \{\}\n    nodes:/);
 });
 
 test('atomically creates and assigns an NPC reference before opening the new target', async ({ page }) => {
   await connect(page);
   await createResource(page, 'npc', 'demo:assign-source');
   page.once('dialog', dialog => dialog.accept('demo:assigned-walk'));
-  await page.getByRole('group', { name: /demo:assign-source, npc/ })
-    .getByRole('button', { name: 'Create and assign player behavior' }).click();
+  await nodeMenuAction(page.getByRole('group', { name: /demo:assign-source, npc/ }), 'Create and assign player behavior');
   await expect(page.locator('.tab-open', { hasText: 'demo:assigned-walk' })).toHaveAttribute('aria-current', 'page');
   await page.locator('#project button', { hasText: 'demo:assign-source' }).click();
   await expect(page.locator('#source')).toHaveValue(/player-behavior: demo:assigned-walk/);
@@ -379,8 +442,8 @@ test('keeps bounded comments, groups, bookmarks, color labels, collapse state, a
   await page.getByRole('group', { name: /Custom YAML/ }).click();
   await expect(root).toHaveCSS('border-color', 'rgb(51, 102, 153)');
 
-  await root.getByRole('button', { name: 'Bookmark', exact: true }).click();
-  await root.getByRole('button', { name: 'Collapse', exact: true }).click();
+  await nodeMenuAction(root, 'Bookmark');
+  await nodeMenuAction(root, 'Collapse');
   await page.getByRole('button', { name: /Add layout-only reroute/ }).click();
   await expect(page.getByRole('button', { name: /Reroute 1/ })).toBeVisible();
   await expect(root).toHaveClass(/bookmarked/); await expect(root).toHaveClass(/collapsed/);
@@ -401,11 +464,33 @@ test('keeps bounded comments, groups, bookmarks, color labels, collapse state, a
   await expect(page.locator('#source')).toHaveValue(/future: !vendor retained/);
 });
 
+test('moves layout-only wire reroute points and restores their final drag with undo and redo', async ({ page }) => {
+  await connect(page);
+  await page.getByRole('button', { name: /Add layout-only reroute/ }).click();
+  const reroute = page.getByRole('button', { name: /Reroute 1/ });
+  await expect(reroute).toBeVisible();
+  const before = { x: await reroute.getAttribute('cx'), y: await reroute.getAttribute('cy') };
+  const box = await reroute.boundingBox();
+  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + 75, box.y + 45, { steps: 4 });
+  await page.mouse.up();
+  await expect.poll(async () => ({ x: await reroute.getAttribute('cx'), y: await reroute.getAttribute('cy') }))
+    .not.toEqual(before);
+  const moved = { x: await reroute.getAttribute('cx'), y: await reroute.getAttribute('cy') };
+  await page.getByRole('button', { name: 'Undo' }).click();
+  await expect.poll(async () => ({ x: await reroute.getAttribute('cx'), y: await reroute.getAttribute('cy') }))
+    .toEqual(before);
+  await page.getByRole('button', { name: 'Redo' }).click();
+  await expect.poll(async () => ({ x: await reroute.getAttribute('cx'), y: await reroute.getAttribute('cy') }))
+    .toEqual(moved);
+});
+
 test('opens quest objectives and lifecycle commands as a nested authoritative subgraph with breadcrumbs', async ({ page }) => {
   await connect(page);
   await createResource(page, 'quest', 'demo:nested');
   await expect(page.getByRole('group', { name: /start, quest-phase/ })).toBeVisible();
-  await page.getByRole('group', { name: /start, quest-phase/ }).getByRole('button', { name: 'Open objectives' }).click();
+  await nodeMenuAction(page.getByRole('group', { name: /start, quest-phase/ }), 'Open objectives');
   await expect(page.locator('#breadcrumbs')).toContainText('Phase start');
   await expect(page.locator('#breadcrumbs')).toContainText('Objectives & lifecycle');
   await expect(page.getByRole('group', { name: /begin, quest-objective/ })).toBeVisible();
@@ -423,7 +508,7 @@ test('relationship map exposes resolved typed links with keyboard open-source an
   await expect(page.locator('.graph-wire.cyclic')).toHaveCount(1);
   await expect(page.locator('.graph-wire.unresolved')).toHaveCount(1);
   await expect(page.getByRole('group', { name: /demo:missing, missing-reference/ })).toContainText('unresolved');
-  await page.getByRole('group', { name: /demo:missing, missing-reference/ }).getByRole('button', { name: 'Create missing' }).click();
+  await nodeMenuAction(page.getByRole('group', { name: /demo:missing, missing-reference/ }), 'Create missing');
   await expect(page.locator('.tab-open', { hasText: 'demo:missing' })).toHaveAttribute('aria-current', 'page');
   await page.getByRole('button', { name: 'Relationship Map' }).click();
   await page.getByRole('button', { name: 'Open relationship target' }).first().focus();
@@ -477,11 +562,74 @@ test('responsive and reduced-motion modes retain keyboard-visible controls', asy
   await page.setViewportSize({ width: 680, height: 900 });
   await page.emulateMedia({ reducedMotion: 'reduce', colorScheme: 'dark' });
   await connect(page);
-  await expect(page.locator('#content-browser')).toBeVisible();
+  await expect(page.locator('#content-browser')).toBeHidden();
   await expect(page.locator('#graph-canvas')).toBeVisible();
+  await page.locator('#browser-toggle').click();
+  await expect(page.locator('#content-browser')).toBeVisible();
+  await page.keyboard.press('Escape');
   await page.locator('#graph-canvas').focus();
   await expect(page.locator('#graph-canvas')).toBeFocused();
-  await expect(page.getByRole('separator', { name: 'Resize Details panel' })).toBeHidden();
+  await expect(page.getByRole('separator', { name: 'Resize Inspector' })).toBeHidden();
+});
+
+test('matches the bounded desktop hierarchy and persists clamped presentation-only layout', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 }); await connect(page);
+  const toolbar = await page.locator('.global-toolbar').boundingBox();
+  const browser = await page.locator('#content-browser').boundingBox();
+  const inspector = await page.locator('#inspector').boundingBox();
+  const dock = await page.locator('#output-dock').boundingBox();
+  const statusBar = await page.locator('#workspace-status').boundingBox();
+  expect(toolbar.height).toBeLessThanOrEqual(48); expect(browser.width).toBe(280);
+  expect(inspector.width).toBe(320); expect(dock.height).toBe(34); expect(statusBar.height).toBe(24);
+  await expect(page.locator('.source-pane')).toBeHidden();
+
+  const splitter = page.getByRole('separator', { name: 'Resize content browser' });
+  await splitter.focus(); await page.keyboard.press('ArrowRight');
+  await expect(page.locator('#content-browser')).toHaveCSS('width', '288px');
+  await page.reload(); await expect(page.locator('#workspace')).toBeVisible();
+  await expect(page.locator('#content-browser')).toHaveCSS('width', '288px');
+  await page.evaluate(() => {
+    const key = Object.keys(localStorage).find(value => value.startsWith('persona:panel-layout:v2:'));
+    const layout = JSON.parse(localStorage.getItem(key)); layout.browserWidth = 50_000; localStorage.setItem(key, JSON.stringify(layout));
+  });
+  await page.reload(); await expect(page.locator('#workspace')).toBeVisible();
+  await expect(page.locator('#content-browser')).toHaveCSS('width', '480px');
+});
+
+test('uses exclusive narrow drawers and restores graph focus after Escape', async ({ page }) => {
+  await page.setViewportSize({ width: 680, height: 900 }); await connect(page);
+  const root = page.getByRole('group', { name: /root, sequence/ }); await root.click();
+  await expect(page.locator('#content-browser')).toBeHidden(); await expect(page.locator('#inspector')).toBeVisible();
+  await expect(page.locator('#inspector')).toHaveAttribute('aria-modal', 'true');
+  await page.keyboard.press('Escape'); await expect(page.locator('#inspector')).toBeHidden();
+  await expect(root).toBeFocused();
+});
+
+test('visual regression: default desktop canvas hierarchy', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'Pixel baselines are recorded once; Firefox has behavioral coverage.');
+  await page.setViewportSize({ width: 1440, height: 900 }); await connect(page);
+  await expect(page).toHaveScreenshot('desktop-workspace.png', {
+    animations: 'disabled', maxDiffPixelRatio: 0.01
+  });
+});
+
+test('visual regression: expanded dock and selected validation/live states', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'Pixel baselines are recorded once; Firefox has behavioral coverage.');
+  await page.setViewportSize({ width: 1440, height: 900 }); await connect(page);
+  const root = page.getByRole('group', { name: /root, sequence/ }); await root.click();
+  await page.getByRole('tab', { name: 'YAML' }).click();
+  await root.evaluate(element => element.classList.add('has-diagnostic', 'live-active'));
+  await expect(page).toHaveScreenshot('desktop-dock-states.png', {
+    animations: 'disabled', maxDiffPixelRatio: 0.01
+  });
+});
+
+test('visual regression: narrow canvas-first workspace', async ({ page, browserName }) => {
+  test.skip(browserName !== 'chromium', 'Pixel baselines are recorded once; Firefox has behavioral coverage.');
+  await page.setViewportSize({ width: 680, height: 900 }); await connect(page);
+  await expect(page).toHaveScreenshot('narrow-workspace.png', {
+    animations: 'disabled', maxDiffPixelRatio: 0.01
+  });
 });
 
 test.describe('touch input audit', () => {

@@ -12,6 +12,9 @@ import { findModelNode } from './modules/yaml-documents.js';
 import { liveNodeKeys } from './modules/live-overlays.js';
 import { nestedProjection } from './modules/graph-projection.js';
 import { publicationReady, validationHeading, diagnosticLabel } from './modules/validation.js';
+import { revealSource } from './modules/source-selection.js';
+import { BottomDock } from './modules/bottom-dock.js';
+import { hasGraphCapability } from './modules/capabilities.js';
 
 const sessionId = location.pathname.match(/^\/editor\/session\/([0-9a-f-]+)$/i)?.[1];
 if (!sessionId) throw new Error('The Persona editor requires a server-created session URL.');
@@ -78,27 +81,39 @@ const workspaceShell = new WorkspaceShell({
     workspaceShell.setNestedBreadcrumbs();
     state.pendingYamlPath = resource.yamlPath || null;
     selectFile(resource.path);
+    if (matchMedia('(max-width: 899px)').matches && !panelLayout.value.browserCollapsed)
+      panelLayout.toggle('browser');
   },
   empty: () => { state.selected = null; source.value = ''; source.disabled = true; fileName.textContent = 'Select a resource'; },
   dirty: resource => state.files.get(resource.path) !== state.original.get(resource.path),
   invalid: resource => state.documentValidity.get(resource.path) === false,
   referenced: resource => state.referenceGraph.references.some(value => value.targetType === resource.kind && value.targetId === resource.id),
   missing: resource => state.referenceGraph.references.some(value => !value.resolved && value.sourceType === resource.kind && value.sourceId === resource.id),
+  searchTerms: resource => state.referenceGraph.references.filter(reference =>
+    reference.sourceType === resource.kind && reference.sourceId === resource.id
+      || reference.targetType === resource.kind && reference.targetId === resource.id)
+    .map(reference => `${reference.sourceType} ${reference.sourceId} ${reference.targetType} ${reference.targetId}`).join(' '),
+  bookmarked: resource => resource.identity === graphCanvas?.projection?.resourceIdentity
+    ? graphCanvas.bookmarks.size > 0 : Boolean(state.graphTabContexts.get(resource.identity)?.bookmarks?.length),
   live: resource => resource.kind === 'npc'
     ? [...state.liveData.npcs.values()].some(value => value.definitionId === resource.id)
     : resource.kind === 'behavior' ? [...state.liveData.behaviors.values()].some(value => value.behaviorId === resource.id) : false,
   restoreFocus: () => document.querySelector('#content-search')?.focus()
 });
-const panelLayout = new PanelLayout('persona:panel-layout:' + sessionId);
+const panelLayout = new PanelLayout('persona:panel-layout:' + sessionId, {
+  onStorageError: () => { status.textContent = 'Layout preferences could not be saved; editing remains available.'; }
+});
 const graphLayoutStore = new GraphLayoutStore(sessionId);
 const graphInspector = new GraphInspector({
   onSelectSource: (path, range) => {
     if (!path || !range) return;
     if (state.relationshipMode) { status.textContent = 'Double-click a resolved resource node to open its source.'; return; }
-    state.selectedNode = path; source.focus(); source.setSelectionRange(range.startOffset, range.endOffset);
+    state.selectedNode = path; revealSource(source, range);
     selectVisualNode(path);
   },
   onEditField: (field, value) => applyVisualEdit(field.yamlPath, value),
+  onFocusNode: id => graphCanvas.focusNode(id),
+  onParameterAction: action => handleScriptParameterAction(action),
   suggestions: field => field.label === 'world' ? [
     ...[...state.liveData.players.values()].map(player => player.world),
     ...[...state.liveData.npcs.values()].map(npc => npc.position?.world)
@@ -112,11 +127,11 @@ const graphInspector = new GraphInspector({
 let graphMutationClient;
 const graphCanvas = new GraphCanvas({
   onSelection: nodes => {
-    graphInspector.render(nodes);
+    graphInspector.render(nodes, graphCanvas.projection, graphCanvas.liveNodeKeys);
+    if (nodes.length && matchMedia('(max-width: 899px)').matches) panelLayout.show('inspector');
     if (graphCanvas.projection?.resourceKind !== 'relationship' && nodes.length === 1 && nodes[0].yamlPath) {
-      if (editorElement.dataset.view === 'visual') setEditorView('split');
       state.selectedNode = nodes[0].yamlPath;
-      source.setSelectionRange(nodes[0].range.startOffset, nodes[0].range.endOffset);
+      revealSource(source, nodes[0].range, { focus: false });
       selectVisualNode(nodes[0].yamlPath, false);
     }
   },
@@ -127,18 +142,32 @@ const graphCanvas = new GraphCanvas({
       if (resource) workspaceShell.openResource(resource);
       return;
     }
-    if (node.kind === 'resource-reference' && ['behavior', 'dialogue', 'quest', 'npc', 'script'].includes(node.subtitle)) {
+    if (['resource-reference', 'resource-value'].includes(node.kind)
+        && ['behavior', 'dialogue', 'quest', 'npc', 'script'].includes(node.subtitle)) {
       const resource = deriveResources(state.files).find(item => item.kind === node.subtitle && item.id === node.title);
       if (resource) { workspaceShell.openResource(resource); return; }
       yamlStatus.textContent = `Missing ${node.subtitle} ${node.title}. Use Create missing to add it safely.`;
     }
-    if (!node.yamlPath) return; source.focus();
-    source.setSelectionRange(node.range.startOffset, node.range.endOffset);
+    if(node.kind==='script-value'){const pin=(node.pins||[]).find(value=>value.direction==='output'&&value.channel==='DATA');const id=(node.fields||[]).find(field=>field.label==='value')?.value;if(pin&&id&&['quest','npc','behavior','dialogue','script'].includes(pin.valueType)){const resource=deriveResources(state.files).find(item=>item.kind===pin.valueType&&item.id===id);if(resource){workspaceShell.openResource(resource);return;}}}
+    if (!node.yamlPath) return; revealSource(source, node.range);
   },
-  onPin: pin => { status.textContent = pin.direction + ' pin ' + pin.label + ' accepts ' + pin.semanticType + ' (' + pin.cardinality + ').'; },
+  onPin: pin => { status.textContent = `${String(pin.channel).toLowerCase()} ${pin.direction} pin ${pin.label} accepts ${pin.valueType} (${pin.cardinality}).`; },
+  resourceOptions: kind => deriveResources(state.files).filter(resource => resource.kind === kind)
+    .map(resource => ({ id: resource.id, label: resource.label })),
   onConnectionPending: pin => { status.textContent = `Selected ${pin.label} output. Choose a compatible input; Escape cancels.`; },
   onConnectionError: message => { yamlStatus.textContent = `Connection rejected before changing YAML: ${message}`; status.textContent = message; },
   onConnect: gesture => commandDispatcher.execute('graph.connect', gesture),
+  onInlineDefault: (pin, value) => graphMutationClient.mutate([
+    graphCanvas.projection?.resourceKind === 'script'
+      ? { type: 'SET_PIN_DEFAULT', targetPinId: pin.id, value }
+      : { type: 'EDIT_FIELD', yamlPath: pin.yamlPath, value }
+  ], `Set ${pin.label} value`),
+  onResourceDrop: async (resource,position,targetPin) => { const key=`value-${crypto.randomUUID().replaceAll('-','').slice(0,8)}`;
+    const create={ type:'CREATE_VALUE_NODE',key,value:resource.id,valueType:resource.kind }, operations=targetPin
+      ? [{type:'COMPOUND',operationId:crypto.randomUUID(),children:[create,{type:'CONNECT',key:`wire-${crypto.randomUUID().replaceAll('-','').slice(0,12)}`,sourcePinId:`script:${graphCanvas.projection.resourceId}#node:${key}:output:value`,targetPinId:targetPin.id}]}]
+      : [create];
+    const result=await graphMutationClient.mutate(operations,`${targetPin?'Connect':'Add'} ${resource.id}`);
+    const node=result?.projection?.nodes?.find(candidate=>candidate.title===key);if(node){graphCanvas.positions[node.id]=position;graphCanvas.schedule();graphCanvas.changed();} },
   onDisconnect: edge => commandDispatcher.execute('graph.disconnect', edge),
   onInsertWire: (edge, sourcePin) => commandDispatcher.execute('graph.add', { sourcePin, edge }),
   onPalette: context => commandDispatcher.execute('graph.add', context),
@@ -155,7 +184,7 @@ const graphCanvas = new GraphCanvas({
   },
   onCommand: command => {
     if (command.type === 'DELETE') commandDispatcher.execute('graph.delete', command.nodeIds);
-    if (command.type === 'LAYOUT') recordHistory(state.selected, command.before);
+    if (command.type === 'LAYOUT') { recordHistory(state.selected, command.before); appendGraphHistory('Local layout command', 'local'); }
     if (command.type === 'COPY') commandDispatcher.execute('graph.copy', command.nodeIds);
     if (command.type === 'PASTE') commandDispatcher.execute('graph.paste');
   }
@@ -194,7 +223,9 @@ graphMutationClient = new GraphMutationClient({
       throw new Error('Wait for the authoritative graph projection before editing.');
     const selected = state.selected, connectionGeneration = state.connectionGeneration,
       resourceIdentity = resource.identity, content = state.files.get(selected) ?? '';
-    return { resource, projection, content, projectFiles: await contentFiles(), selected,
+    const projectFiles = await contentFiles();
+    return { resource, projection, content, projectFiles,
+      projectRevision: await projectRevision(projectFiles), selected,
       isCurrent: () => state.connected && state.connectionGeneration === connectionGeneration
         && state.selected === selected && workspaceShell.activeResource()?.identity === resourceIdentity };
   },
@@ -217,11 +248,12 @@ commandDispatcher
   .register('graph.connect', { label: 'Connect nodes', enabled: gesture => Boolean(gesture?.operations?.length),
     run: gesture => graphMutationClient.mutate(gesture.operations, 'Connect nodes') })
   .register('graph.disconnect', { label: 'Disconnect nodes', enabled: edge => Boolean(edge), run: edge =>
-    graphMutationClient.mutate([{ type: 'DISCONNECT', yamlPath: edge.sourceYamlPath,
+    graphMutationClient.mutate([{ type: 'DISCONNECT', edgeId: edge.id, yamlPath: edge.sourceYamlPath,
       sourcePinId: edge.sourcePinId, targetPinId: edge.targetPinId }], 'Disconnect nodes') })
-  .register('graph.add', { label: 'Add graph node', enabled: () => state.connected && Boolean(graphCanvas.projection?.editable),
+  .register('graph.add', { label: 'Add graph node', enabled: () => state.connected && hasGraphCapability(graphCanvas.projection, 'CREATE_NODE'),
     run: context => openGraphPalette(context || { sourcePin: null }) })
-  .register('graph.delete', { label: 'Delete selected graph nodes', enabled: nodeIds => Boolean(nodeIds?.length),
+  .register('graph.delete', { label: 'Delete selected graph nodes', enabled: nodeIds => Boolean(nodeIds?.length)
+      && hasGraphCapability(graphCanvas.projection, 'DELETE_NODE'),
     run: deleteGraphNodes })
   .register('graph.copy', { label: 'Copy selected behavior node', enabled: nodeIds => Boolean(nodeIds?.length),
     run: copyGraphNode })
@@ -229,12 +261,24 @@ commandDispatcher
     run: pasteGraphNode })
   .register('graph.align-left', { label: 'Align selected nodes left', enabled: () => graphCanvas.selection.size >= 2,
     run: () => graphCanvas.align('left') })
+  .register('graph.align-center', { label: 'Align selected node centers', enabled: () => graphCanvas.selection.size >= 2,
+    run: () => graphCanvas.align('center') })
+  .register('graph.align-right', { label: 'Align selected nodes right', enabled: () => graphCanvas.selection.size >= 2,
+    run: () => graphCanvas.align('right') })
   .register('graph.align-top', { label: 'Align selected nodes top', enabled: () => graphCanvas.selection.size >= 2,
     run: () => graphCanvas.align('top') })
+  .register('graph.align-middle', { label: 'Align selected node middles', enabled: () => graphCanvas.selection.size >= 2,
+    run: () => graphCanvas.align('middle') })
+  .register('graph.align-bottom', { label: 'Align selected nodes bottom', enabled: () => graphCanvas.selection.size >= 2,
+    run: () => graphCanvas.align('bottom') })
   .register('graph.distribute-horizontal', { label: 'Distribute selected nodes horizontally', enabled: () => graphCanvas.selection.size >= 3,
     run: () => graphCanvas.distribute('horizontal') })
   .register('graph.distribute-vertical', { label: 'Distribute selected nodes vertically', enabled: () => graphCanvas.selection.size >= 3,
     run: () => graphCanvas.distribute('vertical') })
+  .register('graph.snap', { label: 'Snap selected nodes to grid', enabled: () => graphCanvas.selection.size > 0,
+    run: () => graphCanvas.snapSelection() })
+  .register('graph.tidy', { label: 'Tidy selected nodes', enabled: () => graphCanvas.selection.size > 0,
+    run: () => graphCanvas.tidySelection() })
   .register('graph.auto-layout', { label: 'Auto-layout graph', enabled: () => Boolean(graphCanvas.projection),
     run: () => graphCanvas.autoLayout() })
   .register('graph.comment', { label: 'Add graph comment', enabled: () => Boolean(graphCanvas.projection), run: () => {
@@ -252,6 +296,8 @@ commandDispatcher
     run: () => graphCanvas.focusRelated('upstream') })
   .register('graph.focus-downstream', { label: 'Focus downstream nodes', enabled: () => graphCanvas.selection.size > 0,
     run: () => graphCanvas.focusRelated('downstream') })
+  .register('graph.focus-connected', { label: 'Focus connected component', enabled: () => graphCanvas.selection.size > 0,
+    run: () => graphCanvas.focusRelated('connected') })
   .register('graph.node-action', { label: 'Graph node action', enabled: action => Boolean(action?.type), run: handleGraphNodeAction })
   .register('history.undo', { label: 'Undo', keywords: 'history', enabled: () => Boolean(state.histories.get(state.selected)?.undo.length),
     run: () => restoreHistory('undo') })
@@ -270,6 +316,7 @@ commandDispatcher
 function lockWorkspace(message) {
   if (state.connected) persistRecovery();
   state.connected = false;
+  document.querySelector('#status-connection').textContent = 'Disconnected—editing stopped';
   state.connectionGeneration++;
   clearTimeout(state.autosaveTimer);
   clearTimeout(state.parseTimer);
@@ -300,10 +347,17 @@ function flushSelected() {
 
 function renderProject(files, message, revision = null) {
   requireConnection();
+  const layoutScope = `${state.installationIdentity || sessionId}:persona-project`;
+  panelLayout.rekey(`persona:panel-layout:v2:${layoutScope}`);
+  workspaceShell.setPreferenceScope(layoutScope);
+  graphLayoutStore.scope = layoutScope;
   state.files = new Map(files.map(file => [file.path, file.content]));
   state.original = new Map(state.files);
   state.baseRevision = revision;
   state.currentRevision = revision;
+  document.querySelector('#status-connection').textContent = 'Connected';
+  document.querySelector('#status-revision').textContent = revision ? `Base ${revision.slice(0, 10)}` : 'Revision —';
+  document.querySelector('#status-save').textContent = 'Saved';
   state.documentModels.clear(); state.originalModels.clear(); state.documentValidity.clear(); state.histories.clear();
   state.graphProjections.clear(); graphCanvas.clear();
   const recoveryKey = `persona:recovery:${sessionId}`;
@@ -366,7 +420,7 @@ function selectFile(path) {
   renderDocument(state.documentModels.get(path)); yamlStatus.textContent = '';
   const cachedGraph = state.graphProjections.get(workspaceShell.activeResource()?.identity);
   if (cachedGraph) {
-    graphLayoutStore.scope = (state.installationIdentity || sessionId) + ':' + (state.baseRevision || 'unknown');
+    graphLayoutStore.scope = `${state.installationIdentity || sessionId}:persona-project`;
     const tabContext = state.graphTabContexts.get(cachedGraph.resourceIdentity);
     graphCanvas.setProjection(cachedGraph, tabContext || null);
     graphLayoutStore.load(cachedGraph).then(layout => {
@@ -683,15 +737,33 @@ async function applyGraphMutationResult(result, { label, context }) {
   if (!context.isCurrent()) return;
   const layout = graphCanvas.snapshot();
   source.value = result.content;
-  state.files.set(context.selected, result.content);
+  if (result.rawFiles?.length) state.files = new Map(result.rawFiles.map(file => [file.path, file.content]));
+  else state.files.set(context.selected, result.content);
+  for (const patch of result.patches || []) if (patch.filePath !== context.selected) {
+    state.documentModels.delete(patch.filePath); state.documentValidity.delete(patch.filePath);
+    state.histories.delete(patch.filePath);
+  }
   state.documentModels.set(context.selected, result.document);
   state.documentValidity.set(context.selected, true);
   state.graphProjections.set(context.resource.identity, result.projection);
   yamlStatus.textContent = `${label} applied as ${result.appliedOperationCount} authoritative operation${result.appliedOperationCount === 1 ? '' : 's'}; unrelated YAML was retained.`;
+  appendGraphHistory(label, 'accepted', result.projectRevision || result.contentDigest);
   renderDocument(result.document);
   showGraphProjection(result.projection, layout);
+  const focusedId = Object.values(result.identityRemap || {})[0];
+  if (focusedId) { graphCanvas.select(focusedId, false); graphCanvas.focusNode(focusedId); }
   graphCanvas.setStale(false);
+  refreshWorkspaceResources(); refreshProjectReferences(); invalidateValidation();
   refreshDirty(); scheduleAutosave(); scheduleRecovery(); updateHistoryButtons();
+}
+
+function appendGraphHistory(label, kind, revision = null) {
+  const list = document.querySelector('#inspector-history');
+  if (list.children.length === 1 && list.firstElementChild?.textContent === 'No graph commands yet.') list.replaceChildren();
+  const item = document.createElement('li'), time = new Date().toLocaleTimeString();
+  item.textContent = `${workspaceShell.activeResource()?.label || 'Project'} · ${label} · ${kind === 'local' ? 'local presentation only' : 'server accepted'} · ${time}`
+    + (revision ? ` · ${String(revision).slice(0, 12)}` : '');
+  list.prepend(item); while (list.children.length > 100) list.lastElementChild.remove();
 }
 
 function deleteGraphNodes(nodeIds) {
@@ -734,15 +806,25 @@ function pasteGraphNode() {
 
 function handleGraphNodeAction({ type, node }) {
   if (type === 'DUPLICATE_NODE') {
-    graphMutationClient.mutate([{ type: 'DUPLICATE', yamlPath: node.yamlPath }], 'Duplicate graph node'); return;
+    graphMutationClient.mutate([{ type: 'DUPLICATE', operationId: crypto.randomUUID(), yamlPath: node.yamlPath }], 'Duplicate graph node'); return;
   }
   if (type === 'DELETE_NODE') { deleteGraphNodes([node.id]); return; }
+  if (type === 'MOVE_NODE_EARLIER' || type === 'MOVE_NODE_LATER') {
+    const parent = node.yamlPath.substring(0, node.yamlPath.lastIndexOf('/'));
+    const siblings = (graphCanvas.projection?.nodes || []).filter(value => value.yamlPath
+      && value.yamlPath.substring(0, value.yamlPath.lastIndexOf('/')) === parent
+      && /^\d+$/.test(value.yamlPath.split('/').at(-1)))
+      .sort((left, right) => Number(left.yamlPath.split('/').at(-1)) - Number(right.yamlPath.split('/').at(-1)));
+    const index = siblings.findIndex(value => value.id === node.id), target = siblings[index + (type === 'MOVE_NODE_EARLIER' ? -1 : 1)];
+    if (target) applyStructure(type === 'MOVE_NODE_EARLIER' ? 'MOVE_BEFORE' : 'MOVE_AFTER', node.yamlPath, target.yamlPath);
+    return;
+  }
   if (type === 'WRAP_NODE') {
     const nodeKind = prompt('Wrapper type: sequence, selector, priority-selector, parallel, invert, repeat, retry, timeout, cooldown, or checkpoint', 'sequence')?.trim();
     if (!nodeKind) return;
     const key = prompt('Stable wrapper ID', `wrapper-${crypto.randomUUID().slice(0, 8)}`)?.trim();
     if (!key) return;
-    graphMutationClient.mutate([{ type: 'WRAP', yamlPath: node.yamlPath, nodeKind, key }], 'Wrap graph node'); return;
+    graphMutationClient.mutate([{ type: 'WRAP', operationId: crypto.randomUUID(), yamlPath: node.yamlPath, nodeKind, key }], 'Wrap graph node'); return;
   }
   if (type === 'UNWRAP_NODE') {
     graphMutationClient.mutate([{ type: 'UNWRAP', yamlPath: node.yamlPath }], 'Unwrap graph node'); return;
@@ -751,6 +833,7 @@ function handleGraphNodeAction({ type, node }) {
     graphMutationClient.mutate([{ type: 'EDIT_FIELD', yamlPath: '/start', value: node.title }], 'Set dialogue start');
     return;
   }
+  if(type==='ADD_SCRIPT_PARAMETER'){const name=prompt('Parameter name','value')?.trim();if(!name)return;const valueType=prompt('Nominal type (for example integer, text, quest)','string')?.trim();if(!valueType)return;const required=confirm('Require callers to provide this parameter?');const defaultValue=required?null:prompt('Inline default (leave blank for none)','');graphMutationClient.mutate([{type:'ADD_SCRIPT_PARAMETER',parentYamlPath:`${graphCanvas.projection.rootYamlPath}/${node.kind==='script-input'?'inputs':'outputs'}`,key:name,valueType,required,defaultValue:defaultValue||null}],`Add ${name} parameter`);return;}
   if (type === 'OPEN_REFERENCED_RESOURCE') {
     const resource = deriveResources(state.files).find(item => item.kind === node.subtitle && item.id === node.title);
     if (resource) workspaceShell.openResource(resource);
@@ -795,7 +878,7 @@ function handleGraphNodeAction({ type, node }) {
       .catch(error => { status.textContent = `Create and assign failed: ${error.message}`; });
     return;
   }
-  if (type === 'TOGGLE_BOOKMARK') { graphCanvas.toggleBookmark(node.id); return; }
+  if (type === 'TOGGLE_BOOKMARK') { graphCanvas.toggleBookmark(node.id); workspaceShell.renderBrowser(); return; }
   if (type === 'TOGGLE_COLLAPSE') { graphCanvas.toggleCollapse(node.id); return; }
   if (type === 'CREATE_MISSING_RESOURCE') {
     const diagnostic = (graphCanvas.projection?.diagnostics || []).find(issue =>
@@ -829,6 +912,37 @@ function handleGraphNodeAction({ type, node }) {
   }
 }
 
+function handleScriptParameterAction({ type, port, neighbor }) {
+  const parentYamlPath = port.yamlPath.substring(0, port.yamlPath.lastIndexOf('/'));
+  if (type === 'RENAME_SCRIPT_PARAMETER') {
+    const newName = prompt(`Rename parameter ${port.label}`, port.label)?.trim();
+    if (!newName || newName === port.label) return;
+    graphMutationClient.mutate([{ type, parentYamlPath, parameterName: port.label, newName }],
+      `Rename parameter ${port.label}`); return;
+  }
+  if (type === 'CHANGE_SCRIPT_PARAMETER_TYPE') {
+    const valueType = prompt(`Nominal type for ${port.label}`, port.valueType)?.trim();
+    if (!valueType || valueType === port.valueType) return;
+    graphMutationClient.mutate([{ type, yamlPath: port.yamlPath, parentYamlPath, parameterName: port.label, valueType }],
+      `Change ${port.label} type`); return;
+  }
+  if (type === 'REORDER_SCRIPT_PARAMETER' && neighbor) {
+    const before = (neighbor.order ?? 0) < (port.order ?? 0);
+    graphMutationClient.mutate([{ type, yamlPath: port.yamlPath, parentYamlPath,
+      parameterName: port.label, [before ? 'beforePortId' : 'afterPortId']: neighbor.id }],
+      `Reorder parameter ${port.label}`); return;
+  }
+  if (type === 'DELETE_SCRIPT_PARAMETER') {
+    const scriptId = graphCanvas.projection?.resourceId || '';
+    const callFiles = [...state.files].filter(([, content]) => content.includes(`script: ${scriptId}`)
+      && new RegExp(`(^|\\n)\\s*${port.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`).test(content)).length;
+    const wires = (graphCanvas.projection?.edges || []).filter(edge =>
+      edge.sourcePinId === port.id || edge.targetPinId === port.id).length;
+    if (!confirm(`Delete parameter ${port.label}? Preview: ${wires} local connection${wires === 1 ? '' : 's'} and bindings in ${callFiles} caller file${callFiles === 1 ? '' : 's'} will be removed atomically.`)) return;
+    graphMutationClient.mutate([{ type, parentYamlPath, parameterName: port.label }], `Delete parameter ${port.label}`);
+  }
+}
+
 function openRelationshipNode(node) {
   if (!node?.kind?.startsWith('relationship-')) {
     status.textContent = 'The unresolved relationship target has no resource to open.'; return;
@@ -850,13 +964,21 @@ async function applyStructure(operation, path, targetPath) {
   if (operation === 'DELETE') return graphMutationClient.mutate([{ type: 'DELETE', yamlPath: path }], 'Delete graph node');
   if (operation === 'DUPLICATE_AFTER') return graphMutationClient.mutate([{ type: 'DUPLICATE', yamlPath: path }], 'Duplicate graph node');
   if (operation === 'MOVE_BEFORE' || operation === 'MOVE_AFTER') {
-    const model = state.documentModels.get(state.selected), target = findModelNode(model?.root, targetPath), parent = parentNode(model, targetPath);
-    if (!target || parent?.kind !== 'sequence') { yamlStatus.textContent = 'Reorder rejected: destination is not an ordered YAML sequence.'; return; }
-    const withoutSource = parent.children.filter(child => child.path !== path);
-    const targetIndex = withoutSource.findIndex(child => child.path === targetPath);
-    if (targetIndex < 0) { yamlStatus.textContent = 'Reorder rejected: destination changed before the gesture completed.'; return; }
-    const index = targetIndex + (operation === 'MOVE_AFTER' ? 1 : 0);
-    return graphMutationClient.mutate([{ type: 'REORDER', yamlPath: path, parentYamlPath: parent.path, index }], 'Reorder graph nodes');
+    const parentPath = targetPath?.substring(0, targetPath.lastIndexOf('/'));
+    if (!parentPath || path.substring(0, path.lastIndexOf('/')) !== parentPath) {
+      yamlStatus.textContent = 'Reorder rejected: source and stable neighbor are not in the same projected sequence.'; return;
+    }
+    const targetNode = graphCanvas.projection?.nodes.find(node => node.yamlPath === targetPath);
+    const neighborPort = targetNode?.pins?.find(pin => pin.direction === 'input') || targetNode?.pins?.[0];
+    const parentNode = graphCanvas.projection?.nodes.find(node => node.pins?.some(pin =>
+      pin.direction === 'output' && pin.yamlPath === parentPath && pin.label === '+ child'));
+    const parentPort = parentNode?.pins?.find(pin => pin.direction === 'output' && pin.yamlPath === parentPath && pin.label === '+ child');
+    if (!neighborPort || !parentPort) { yamlStatus.textContent = 'Reorder rejected: stable parent or neighbor ports are no longer projected.'; return; }
+    const sourceNode = graphCanvas.projection?.nodes.find(node => node.yamlPath === path);
+    const edit = { type: 'REORDER', yamlPath: path, targetYamlPath: targetPath,
+      parentYamlPath: parentPath, parentPortId: parentPort.id, nodeId: sourceNode?.id, expectedSourceRange: sourceNode?.range };
+    edit[operation === 'MOVE_AFTER' ? 'afterPortId' : 'beforePortId'] = neighborPort.id;
+    return graphMutationClient.mutate([edit], 'Reorder graph nodes');
   }
   yamlStatus.textContent = `Unsupported structural graph command: ${operation}`;
 }
@@ -928,6 +1050,11 @@ function updateLifecycleButtons() {
   createOpen.disabled = !canEdit;
   createOpen.title = canEdit ? 'Create content (Ctrl/Cmd+N)'
     : 'Requires Draft Edit trust in Minecraft';
+  const globalCreate = document.querySelector('#global-create');
+  globalCreate.disabled = !canEdit;
+  globalCreate.title = createOpen.title;
+  document.querySelector('#status-capabilities').textContent = state.verified?.capabilities?.length
+    ? state.verified.capabilities.join(', ') : 'View only';
   duplicateResourceButton.disabled = !editable;
   renameResourceButton.disabled = !editable;
   moveResourceButton.disabled = !editable || active.kind === 'script';
@@ -1091,6 +1218,7 @@ function updatePublishButton() {
 
 function invalidateValidation() {
   state.validationResult = null; state.validationRequest = null; updatePublishButton();
+  document.querySelector('#status-validation').textContent = 'Stale';
   if (!validationPanel.hidden) validationSummary.textContent = 'Candidate changed; waiting for fresh Persona validation…';
 }
 
@@ -1124,7 +1252,7 @@ function liveKey(kind,value){switch(kind){case'players':return`player:${value.pl
 function applyLiveSnapshot(snapshot){if(!state.liveSubscription||snapshot.subscriptionId!==state.liveSubscription||snapshot.revision<=state.liveRevision)return;if(snapshot.full)for(const values of Object.values(state.liveData))if(values instanceof Map)values.clear();
   for(const removed of snapshot.removedKeys||[])for(const values of Object.values(state.liveData))if(values instanceof Map)values.delete(removed);
   for(const kind of ['players','npcs','behaviors','quests','dialogues','memories'])for(const value of snapshot[kind]||[])state.liveData[kind].set(liveKey(kind,value),value);
-  if(snapshot.server)state.liveData.server=snapshot.server;state.liveRevision=snapshot.revision;renderLive();clearTimeout(state.liveStaleTimer);state.liveStaleTimer=setTimeout(()=>{liveStatus.textContent='Live data is stale; waiting for the connected server…';liveDialog.classList.add('stale');},5000);}
+  if(snapshot.server)state.liveData.server=snapshot.server;state.liveRevision=snapshot.revision;document.querySelector('#status-live').textContent=`Live r${snapshot.revision}`;renderLive();clearTimeout(state.liveStaleTimer);state.liveStaleTimer=setTimeout(()=>{liveStatus.textContent='Live data is stale; waiting for the connected server…';liveDialog.classList.add('stale');},5000);}
 function renderLive(){liveDialog.classList.remove('stale');liveStatus.textContent=`Live revision ${state.liveRevision} · read only · updated ${new Date().toLocaleTimeString()}`;
   renderLiveList('live-players',[...state.liveData.players.values()],value=>`${value.playerId} · ${value.world} · quests ${value.activeQuests.join(', ')||'none'} · runtimes ${value.activeNpcRuntimes}`);
   renderLiveList('live-npcs',[...state.liveData.npcs.values()],value=>{const navigation=value.navigation||{};const elapsed=navigation.startedAt?`${Math.max(0,Math.floor((Date.now()-navigation.startedAt)/1000))}s`:'';return`${value.definitionId}/${value.instanceId} · ${value.playerId||'shared'} · ${value.presentation} · ${value.projectionState} · anchor ${value.anchor||'shared'} · navigation ${navigation.status||'IDLE'} ${navigation.target||''} ${elapsed} ${navigation.reason||''}`.trim();});
@@ -1161,6 +1289,7 @@ async function saveDraft() {
   const generation = state.connectionGeneration;
   if (state.saving) { state.saveAgain = true; return; }
   state.saving = true;
+  document.querySelector('#status-save').textContent = 'Saving…';
   try {
     if (!state.draftId) {
       const key = `persona:${sessionId}:draftId`;
@@ -1178,10 +1307,13 @@ async function saveDraft() {
     status.textContent = saved.stale
       ? 'Draft autosaved, but server content has changed; review before any future publish.'
       : `Draft autosaved at ${new Date(saved.updatedAt).toLocaleTimeString()}.`;
+    document.querySelector('#status-save').textContent = saved.stale ? 'Recovery required' : 'Saved';
+    appendGraphHistory('Draft autosave', 'accepted', saved.revision || saved.draftId);
     requestValidation(saved.draftId);
   } catch (error) {
     if (generation !== state.connectionGeneration) return;
     status.textContent = `Draft autosave failed: ${error.message}`;
+    document.querySelector('#status-save').textContent = 'Unsaved—retrying';
   } finally {
     state.saving = false;
     if (state.saveAgain) { state.saveAgain = false; scheduleAutosave(); }
@@ -1194,6 +1326,7 @@ async function requestValidation(draftId) {
     state.validationRequest = requestId;
     state.validationResult = null; updatePublishButton();
     validationPanel.hidden = false; validationSummary.textContent = 'Persona is validating this candidate…';
+    document.querySelector('#status-validation').textContent = 'Checking…';
     validationList.replaceChildren();
   }
 }
@@ -1211,6 +1344,7 @@ function renderValidation(result) {
     .map(issue => issue.nodeId).filter(Boolean));
   validationPanel.hidden = false;
   validationSummary.textContent = validationHeading(result);
+  document.querySelector('#status-validation').textContent = validationHeading(result);
   validationList.replaceChildren(...result.diagnostics.map(issue => {
     const item = document.createElement('li'), button = document.createElement('button');
     button.type = 'button';
@@ -1299,6 +1433,7 @@ function connectSocket() {
     }
     const delay = Math.min(30000, 1000 * (2 ** Math.min(state.reconnectAttempt++, 5)));
     lockWorkspace('Server connection interrupted; editing is locked while reconnecting…');
+    document.querySelector('#status-connection').textContent = 'Reconnecting';
     if(state.liveSubscription){liveStatus.textContent='Live data is stale; reconnecting…';liveDialog.classList.add('stale');}
     state.reconnectTimer = setTimeout(connectSocket, delay);
   };
@@ -1773,38 +1908,22 @@ publishButton.addEventListener('click', async () => {
   } catch (error) { status.textContent = `Publication request failed: ${error.message}`; updatePublishButton(); }
 });
 
-const outputDock = document.querySelector('#output-dock');
 function setEditorView(view) {
-  if (!['visual', 'split', 'yaml'].includes(view)) view = 'split';
+  if (!['visual', 'split', 'yaml'].includes(view)) view = 'visual';
   editorElement.dataset.view = view;
   for (const name of ['visual', 'split', 'yaml'])
     document.querySelector(`#view-${name}`).setAttribute('aria-pressed', String(name === view));
   localStorage.setItem('persona:editor-view:v1', view);
+  panelLayout.setCenterSplit(view);
+  if (view === 'split' || view === 'yaml') panelLayout.selectDock('yaml', true);
   graphCanvas.schedule();
 }
 for (const view of ['visual', 'split', 'yaml']) document.querySelector(`#view-${view}`).addEventListener('click', () => setEditorView(view));
-setEditorView(localStorage.getItem('persona:editor-view:v1') || 'split');
-const outputTabs = [...document.querySelectorAll('.output-tabs [data-output]')];
+setEditorView(panelLayout.value.centerSplit || localStorage.getItem('persona:editor-view:v1') || 'visual');
+const bottomDock = new BottomDock(panelLayout);
 function showOutput(name) {
-  outputDock.hidden = false;
-  outputTabs.forEach(tab => tab.setAttribute('aria-selected', String(tab.dataset.output === name)));
-  document.querySelectorAll('.output-panel').forEach(panel => panel.hidden = panel.dataset.panel !== name);
-  document.querySelector('#output-collapse').setAttribute('aria-expanded', 'true');
+  bottomDock.show(name);
 }
-outputTabs.forEach(tab => tab.addEventListener('click', () => showOutput(tab.dataset.output)));
-document.querySelector('#output-collapse').addEventListener('click', event => {
-  const expanded = event.currentTarget.getAttribute('aria-expanded') === 'true';
-  document.querySelectorAll('.output-panel').forEach(panel => panel.hidden = true);
-  event.currentTarget.setAttribute('aria-expanded', String(!expanded));
-  if (expanded) {
-    document.querySelector('.editor').style.gridTemplateRows = 'auto auto auto minmax(0,1fr) auto';
-    event.currentTarget.textContent = 'Expand output';
-  } else {
-    document.querySelector('.editor').style.gridTemplateRows = '';
-    event.currentTarget.textContent = 'Collapse output';
-    showOutput(outputTabs.find(tab => tab.getAttribute('aria-selected') === 'true')?.dataset.output || 'yaml');
-  }
-});
 document.querySelector('#references-panel-open').addEventListener('click', loadReferenceGraph);
 document.querySelector('#references-tools-open').addEventListener('click', () => referencesOpen.click());
 document.querySelector('#semantic-panel-open').addEventListener('click', () => loadSemanticDiff(false));
@@ -1813,14 +1932,40 @@ commandDispatcher.bindButton(document.querySelector('#graph-copy'), 'graph.copy'
 commandDispatcher.bindButton(document.querySelector('#graph-paste'), 'graph.paste');
 commandDispatcher.bindButton(document.querySelector('#graph-auto-layout'), 'graph.auto-layout');
 commandDispatcher.bindButton(document.querySelector('#graph-align-left'), 'graph.align-left');
+commandDispatcher.bindButton(document.querySelector('#graph-align-center'), 'graph.align-center');
+commandDispatcher.bindButton(document.querySelector('#graph-align-right'), 'graph.align-right');
 commandDispatcher.bindButton(document.querySelector('#graph-align-top'), 'graph.align-top');
+commandDispatcher.bindButton(document.querySelector('#graph-align-middle'), 'graph.align-middle');
+commandDispatcher.bindButton(document.querySelector('#graph-align-bottom'), 'graph.align-bottom');
 commandDispatcher.bindButton(document.querySelector('#graph-distribute-horizontal'), 'graph.distribute-horizontal');
 commandDispatcher.bindButton(document.querySelector('#graph-distribute-vertical'), 'graph.distribute-vertical');
+commandDispatcher.bindButton(document.querySelector('#graph-snap'), 'graph.snap');
+commandDispatcher.bindButton(document.querySelector('#graph-tidy'), 'graph.tidy');
 commandDispatcher.bindButton(document.querySelector('#graph-comment'), 'graph.comment');
 commandDispatcher.bindButton(document.querySelector('#graph-group'), 'graph.group');
 commandDispatcher.bindButton(document.querySelector('#graph-color'), 'graph.color');
 commandDispatcher.bindButton(document.querySelector('#graph-focus-upstream'), 'graph.focus-upstream');
 commandDispatcher.bindButton(document.querySelector('#graph-focus-downstream'), 'graph.focus-downstream');
+commandDispatcher.bindButton(document.querySelector('#graph-focus-connected'), 'graph.focus-connected');
+document.querySelector('#global-create').addEventListener('click', () => createOpen.click());
+document.querySelector('#global-search').addEventListener('click', () => workspaceShell.showQuickOpen());
+document.querySelector('#global-preview').addEventListener('click', () => showOutput('simulation'));
+document.querySelector('#global-validate').addEventListener('click', () => {
+  if (state.draftId) requestValidation(state.draftId);
+  else status.textContent = 'Save a draft before requesting authoritative validation.';
+});
+document.querySelector('#global-session').addEventListener('click', () => {
+  const expires = state.verified?.expiresAt ? new Date(state.verified.expiresAt).toLocaleTimeString() : 'not authenticated';
+  status.textContent = `Session ${sessionId.slice(0, 8)} · expires ${expires} · ${(state.verified?.capabilities || []).join(', ') || 'no capabilities'}`;
+});
+new MutationObserver(() => { document.querySelector('#global-save').textContent = document.querySelector('#status-save').textContent; })
+  .observe(document.querySelector('#status-save'), { childList: true, characterData: true, subtree: true });
+document.querySelector('#rail-relationship-map').addEventListener('click', event => {
+  document.querySelectorAll('#navigation-rail button').forEach(button => { button.classList.remove('active'); button.removeAttribute('aria-current'); });
+  event.currentTarget.classList.add('active'); event.currentTarget.setAttribute('aria-current', 'page'); relationshipMapOpen.click();
+});
+for (const view of ['library', 'bookmarks', 'recents']) document.querySelector(`#rail-${view}`)
+  .addEventListener('click', () => { panelLayout.show('browser'); workspaceShell.showView(view); });
 let paletteContext = { type: 'commands' };
 
 function graphNodeDefinitions() {
@@ -1846,7 +1991,7 @@ function graphInsertion(definition, sourcePin) {
     }
   } else if (definition.destination === 'script' && ['dialogue', 'quest', 'npc', 'script'].includes(kind)) {
     const owner = sourceNode || selected;
-    if (kind === 'script' && (!owner || owner.kind === 'reusable-script')) parentYamlPath = projection.rootYamlPath;
+    if (kind === 'script') parentYamlPath = `${projection.rootYamlPath}/nodes`;
     else if (kind === 'quest' && owner?.kind === 'quest-phase') parentYamlPath = `${owner.yamlPath}/on-start`;
     else if (kind === 'quest' && owner?.kind === 'quest') parentYamlPath = `${owner.yamlPath}/on-start`.replace(/^\/\//, '/');
     else if (kind === 'npc' && owner?.kind === 'npc') parentYamlPath = `${owner.yamlPath}/on-interact`.replace(/^\/\//, '/');
@@ -1878,7 +2023,11 @@ function graphInsertion(definition, sourcePin) {
 
 function availableGraphNodes() {
   const sourcePin = paletteContext.sourcePin;
-  return compatibleDefinitions(graphNodeDefinitions(), sourcePin,
+  let definitions = graphNodeDefinitions();
+  if (paletteContext.edge && graphCanvas.projection?.resourceKind === 'behavior')
+    definitions = definitions.filter(definition => ['sequence', 'selector', 'priority-selector', 'parallel',
+      'checkpoint', 'cooldown'].includes(definition.nodeKind));
+  return compatibleDefinitions(definitions, sourcePin,
     definition => Boolean(graphInsertion(definition, sourcePin)));
 }
 
@@ -1886,31 +2035,48 @@ async function insertGraphNode(definition) {
   const sourcePin = paletteContext.sourcePin, insertion = graphInsertion(definition, sourcePin);
   if (!insertion) { yamlStatus.textContent = 'No compatible authoritative YAML container exists at this destination.'; return; }
   let key = null;
-  if (definition.requiresKey || graphCanvas.projection.resourceKind === 'behavior') {
+  if (definition.requiresKey || ['behavior', 'script'].includes(graphCanvas.projection.resourceKind)) {
     key = prompt('Stable node ID', `node-${crypto.randomUUID().slice(0, 8)}`)?.trim();
     if (!key) return;
     if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(key)) {
       yamlStatus.textContent = 'Node IDs use lowercase letters, digits, dot, underscore, and hyphen.'; return;
     }
   }
-  const operations = [{ type: 'INSERT', parentYamlPath: insertion.parentYamlPath,
-    nodeKind: definition.nodeKind, key, value: definition.extensionType || null, index: insertion.index }];
+  if (paletteContext.edge && graphCanvas.projection.resourceKind === 'behavior') {
+    const edge = paletteContext.edge;
+    const wrapper = { type: 'WRAP', operationId: crypto.randomUUID(), yamlPath: edge.targetYamlPath,
+      nodeKind: definition.nodeKind, key };
+    await graphMutationClient.mutate([{ type: 'INSERT_ON_WIRE', edgeId: edge.id,
+      sourcePinId: edge.sourcePinId, targetPinId: edge.targetPinId, children: [wrapper] }],
+    `Insert ${definition.label} on wire`);
+    return;
+  }
+  const operations = [{ type: 'INSERT', operationId: crypto.randomUUID(), parentYamlPath: insertion.parentYamlPath,
+    nodeKind: definition.nodeKind, key, value: definition.extensionType || definition.valueType || null, index: insertion.index }];
   if (sourcePin && ['dialogue-entry', 'quest-phase'].includes(definition.nodeKind)) {
     const targetNodeId = `${graphCanvas.projection.resourceKind}:${graphCanvas.projection.resourceId}#${key}`;
     operations.push({ type: 'CONNECT', sourcePinId: sourcePin.id, targetPinId: `${targetNodeId}:in` });
   }
-  await graphMutationClient.mutate(operations, sourcePin ? 'Insert and connect node' : `Insert ${definition.label}`);
+  if (sourcePin && graphCanvas.projection.resourceKind === 'script' && definition.targetPinLabel) {
+    const targetNodeId = `script:${graphCanvas.projection.resourceId}#node:${key}`;
+    operations.push({ type: 'CONNECT', key: `wire-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`,
+      sourcePinId: sourcePin.id, targetPinId: `${targetNodeId}:input:${definition.targetPinLabel}` });
+  }
+  const requestOperations = operations.length > 1
+    ? [{ type: 'COMPOUND', operationId: crypto.randomUUID(), children: operations }] : operations;
+  await graphMutationClient.mutate(requestOperations, sourcePin ? 'Insert and connect node' : `Insert ${definition.label}`);
 }
 
 function renderCommands() {
   const query = paletteSearch.value.trim().toLowerCase();
   const entries = paletteContext.type === 'graph'
-    ? availableGraphNodes().map(definition => [definition.label, () => insertGraphNode(definition)])
-    : commandDispatcher.entries().map(command => [command.label, () => commandDispatcher.execute(command.id)]);
+    ? availableGraphNodes().map(definition => [definition.label, () => insertGraphNode(definition), true, ''])
+    : commandDispatcher.entries().map(command => [command.label, () => commandDispatcher.execute(command.id), command.available, command.reason]);
   const matches = entries.filter(([name]) => name.toLowerCase().includes(query));
-  paletteResults.replaceChildren(...matches.map(([name, run], index) => {
+  paletteResults.replaceChildren(...matches.map(([name, run, available, reason], index) => {
     const item = document.createElement('li'), button = document.createElement('button');
-    button.type = 'button'; button.textContent = name; button.dataset.index = String(index);
+    button.type = 'button'; button.textContent = available ? name : `${name} — ${reason}`;
+    button.disabled = !available; button.title = reason; button.dataset.index = String(index);
     button.addEventListener('click', () => { palette.close(); run(); }); item.append(button); return item;
   }));
   if (!matches.length) {
@@ -1918,7 +2084,6 @@ function renderCommands() {
     empty.textContent = paletteContext.type === 'graph' ? 'No node type is compatible at this destination.' : 'No matching command.';
     paletteResults.append(empty);
   }
-  paletteResults.querySelector('button')?.focus();
 }
 function openPalette() {
   if (!state.connected) return; paletteContext = { type: 'commands' };
@@ -1935,9 +2100,12 @@ function openGraphPalette(context = {}) {
 paletteOpen.addEventListener('click', openPalette);
 paletteSearch.addEventListener('input', renderCommands);
 palette.addEventListener('keydown', event => {
-  const buttons = [...paletteResults.querySelectorAll('button')], current = buttons.indexOf(document.activeElement);
+  const buttons = [...paletteResults.querySelectorAll('button:not(:disabled)')], current = buttons.indexOf(document.activeElement);
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-    event.preventDefault(); buttons[(current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+    event.preventDefault();
+    const next = current < 0 ? (event.key === 'ArrowDown' ? 0 : buttons.length - 1)
+      : (current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length;
+    buttons[next]?.focus();
   }
 });
 window.addEventListener('keydown', event => {

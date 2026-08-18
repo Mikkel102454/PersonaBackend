@@ -10,6 +10,8 @@ public final class GraphContractAdvice {
     @ExceptionHandler(GraphContractException.class)
     ResponseEntity<GraphContractError> graphError(GraphContractException error) {
         return ResponseEntity.status(error.getStatusCode()).body(new GraphContractError(
-                error.code(), error.getReason(), error.filePath(), error.yamlPath()));
+                error.code(), error.getReason(), error.filePath(), error.yamlPath(), error.sourceRange(),
+                error.nodeId(), error.portId(), error.fieldId(), error.retryable(),
+                error.currentContentDigest(), error.currentProjectRevision()));
     }
 }

@@ -1,3 +1,6 @@
+import { normalizeViewport } from './graph-viewport.js';
+export { normalizeViewport } from './graph-viewport.js';
+
 export function deterministicLayout(projection) {
   const nodes = projection.nodes || [];
   const incoming = new Map(nodes.map(node => [node.id, 0]));
@@ -35,14 +38,6 @@ export function deterministicLayout(projection) {
     rows.set(column, row + 1);
   }
   return result;
-}
-
-export function normalizeViewport(value) {
-  return {
-    x: Number.isFinite(value?.x) ? Math.max(-100000, Math.min(100000, value.x)) : 40,
-    y: Number.isFinite(value?.y) ? Math.max(-100000, Math.min(100000, value.y)) : 40,
-    zoom: Number.isFinite(value?.zoom) ? Math.max(.2, Math.min(2.5, value.zoom)) : 1
-  };
 }
 
 export class GraphLayoutStore {

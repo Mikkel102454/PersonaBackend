@@ -50,6 +50,7 @@ public final class ProjectOperationService {
         ProjectDeclaration source = declaration(candidate, request.kind(), request.sourceId());
         if (request.kind().equals("script")) {
             ContentFile scripts = candidate.get(source.path());
+            requireScriptsV2(scripts);
             YamlDocumentResponse model = documents.parse(scripts.content());
             YamlDocumentNode node = find(model.root(), declarationPath("script", request.sourceId()));
             String value = yamlValue(scripts.content(), node);
@@ -72,6 +73,10 @@ public final class ProjectOperationService {
         rules.requireKindAndId(request.kind(), request.replacementId());
         var project = verifyProject(request.files(), request.expectedRevision());
         TreeMap<String, ContentFile> candidate = copy(project);
+        if (request.kind().equals("script")) {
+            ProjectDeclaration source = declaration(candidate, "script", request.currentId());
+            requireScriptsV2(candidate.get(source.path()));
+        }
         RenamePreview preview = references.preview(new RenamePreviewRequest(List.copyOf(candidate.values()),
                 request.kind(), request.currentId(), request.replacementId()));
         if (!preview.safe()) throw bad("RENAME_CONFLICT", String.join(" ", preview.conflicts()));
@@ -114,6 +119,7 @@ public final class ProjectOperationService {
         ProjectDeclaration source = declaration(candidate, request.kind(), request.id());
         if (request.kind().equals("script")) {
             ContentFile file = candidate.get(source.path());
+            requireScriptsV2(file);
             String path = declarationPath("script", request.id());
             String content = documents.structure(new YamlStructureRequest(file.content(),
                     YamlStructureRequest.Operation.DELETE, path, null)).content();
@@ -157,15 +163,19 @@ public final class ProjectOperationService {
             throw bad("INVALID_EXTRACT_SOURCE", "Only a complete script command can be extracted");
         String exactScript = yamlValue(sourceFile.content(), selected);
         String replaced = documents.replaceSequenceItem(sourceFile.content(), request.sourceYamlPath(),
-                "- type: run-script\n  script: " + request.scriptId()).content();
+                "- type: run-script\n  script: " + request.scriptId()+"\n  inputs: {}").content();
         candidate.put(sourceFile.path(), rules.file(sourceFile.path(), replaced));
+
+        String nodeYaml=exactScript.startsWith("- ")?exactScript.substring(2).replace("\n  ","\n"):exactScript;
+        String descriptor="inputs: {}\noutputs: {}\nnodes:\n  entry:\n"+indent(nodeYaml,4)+"connections:\n  enter: { from: $input.exec, to: entry.exec }\n  leave: { from: entry.success, to: $output.exec }\n";
 
         ContentFile scripts = candidate.get("scripts.yml");
         if (scripts == null) candidate.put("scripts.yml", rules.file("scripts.yml",
-                "scripts:\n  " + request.scriptId() + ":\n" + indent(exactScript, 4)));
+                "content-version: 2\nscripts:\n  " + request.scriptId() + ":\n" + indent(descriptor, 4)));
         else {
+            requireScriptsV2(scripts);
             YamlDocumentResponse updated = documents.insertField(new YamlMappingInsertRequest(
-                    scripts.content(), "/scripts", request.scriptId(), exactScript));
+                    scripts.content(), "/scripts", request.scriptId(), descriptor));
             candidate.put("scripts.yml", rules.file("scripts.yml", updated.content()));
         }
         return finish(candidate, List.of(sourceFile.path(), "scripts.yml"), List.of());
@@ -227,7 +237,7 @@ public final class ProjectOperationService {
     public ProjectTemplateResponse template(String kind, String id, String requested) {
         rules.requireKindAndId(kind, id);
         String path = rules.safePath(kind, id);
-        String content = kind.equals("script") ? "scripts:\n  " + id + ":\n    - type: stop\n"
+        String content = kind.equals("script") ? "content-version: 2\nscripts:\n  " + id + ":\n"+indent(scriptDescriptor(),4)
                 : templateContent(kind, id, requested);
         return new ProjectTemplateResponse(kind, id, path, content);
     }
@@ -236,14 +246,18 @@ public final class ProjectOperationService {
         ensureIdAvailable(candidate, "script", id);
         ContentFile scripts = candidate.get("scripts.yml");
         if (scripts == null) {
-            String content = "scripts:\n  " + id + ":\n    - type: stop\n";
+            String content = "content-version: 2\nscripts:\n  " + id + ":\n"+indent(scriptDescriptor(),4);
             candidate.put("scripts.yml", rules.file("scripts.yml", content));
             return;
         }
+        requireScriptsV2(scripts);
         YamlDocumentResponse updated = documents.insertField(new YamlMappingInsertRequest(
-                scripts.content(), "/scripts", id, "- type: stop\n"));
+                scripts.content(), "/scripts", id, scriptDescriptor()));
         candidate.put("scripts.yml", rules.file("scripts.yml", updated.content()));
     }
+
+    private static String scriptDescriptor(){return "inputs: {}\noutputs: {}\nnodes:\n  pause: { type: wait, duration: 1ms }\nconnections:\n  enter: { from: $input.exec, to: pause.exec }\n  leave: { from: pause.success, to: $output.exec }\n";}
+    private void requireScriptsV2(ContentFile scripts){YamlDocumentNode version=find(documents.parse(scripts.content()).root(),"/content-version");if(version==null||!"2".equals(version.value()))throw bad("SCRIPT_FORMAT_MIGRATION_REQUIRED","scripts.yml must be manually migrated to content-version 2 before editing reusable scripts");}
 
     private String templateContent(String kind, String id, String requested) {
         if (requested != null && !requested.isBlank() && !requested.equals("minimal"))

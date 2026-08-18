@@ -58,6 +58,12 @@ Custom YAML cards identify ranges that must be edited in YAML.
 - Dialogue commands can be extracted exactly to `scripts.yml`; the source command becomes a typed
   `run-script` reference and the new script opens in a tab.
 - Behaviour branches retain Convert selection to behaviour. Script cards expose typed callers.
+- Reusable scripts require `scripts.yml` content format 2. Their Input/Output cards edit the typed
+  signature; the Inspector can rename, reorder, change type, or delete a selected parameter. Rename
+  and delete update callers atomically, while incompatible type changes are blocked.
+- Dragging a resource from the Content Browser onto a reusable-script canvas creates a typed value
+  node. Connect only matching circular data pins; triangular execution pins define control flow.
+  Unconnected data inputs expose inline checkbox, numeric, duration, text, or resource controls.
 
 Quest phase cards open objectives, conditions, branches, and lifecycle commands as a nested view of
 the same authoritative projection. Dialogue start cards, transfers, NPC references/anchors, and

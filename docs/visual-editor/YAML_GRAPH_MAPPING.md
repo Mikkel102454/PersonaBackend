@@ -1,6 +1,6 @@
 # Persona YAML to graph mapping
 
-Status: accepted Phase 0 mapping for Persona content format 1. Authoritative runtime
+Status: accepted mapping for the graph contract v3 and Persona script content format 2. Authoritative runtime
 sources are `Persona/content/ContentLoader.java`, `Persona/behavior/BehaviorLoader.java`,
 and extension editor schemas. Paths below are JSON-pointer-shaped YAML paths.
 
@@ -16,7 +16,7 @@ available. No canvas coordinate is a content identity.
 | `dialogues/*.{yml,yaml}` | Dialogue resource + entry nodes | start and transfer edges | `content-version`, `id`, `start` | scalar edit; add/remove/reorder script; entry create/delete; rename |
 | `quests/*.{yml,yaml}` | Quest resource + ordered phase flow | entry, branch, implicit-next, complete | root fields and hooks | scalar edit; phase/objective/script structural patches; rename |
 | `npcs/*.{yml,yaml}` | Central NPC overview | typed reference/containment edges | root presentation fields | scalar edit; list/map patches; reference assignment; rename |
-| `scripts.yml#/scripts/{id}` | Reusable script resource | ordered execution/call edges | script ID and callers | list structural patches; mapping-key create/rename/delete |
+| `scripts.yml#/scripts/{id}` | Explicit typed graph with synthetic Input/Output boundaries | execution and nominal data wires | signature, defaults, callers | keyed node/wire patches; atomic parameter create/rename/reorder/type/delete |
 | unrecognized YAML file | Custom YAML resource | reference edges only when typed by server | raw range | raw YAML edit only |
 
 ## Behaviour nodes
@@ -73,10 +73,25 @@ Behaviour action discriminators and fields:
 | `command` | `command` plus the selected command's fields |
 | namespaced extension action | signed schema fields plus scope/durable metadata |
 
-## Script steps
+## Script steps and reusable graphs
 
-Scripts occur in dialogue entries, NPC hooks, quest/phase/objective hooks, command
-handlers, choice/random branches, and `scripts.yml`. Ordered list position is semantic.
+Inline scripts occur in dialogue entries, NPC hooks, quest/phase/objective hooks, command
+handlers, and choice/random branches. Their ordered list position is semantic. Reusable scripts are
+different: `scripts.yml` must declare `content-version: 2`, and every script is an explicit
+`inputs`/`outputs`/`nodes`/`connections` descriptor. Older reusable-script lists are rejected with a
+migration diagnostic; the editor never guesses a conversion.
+
+Graph contract v3 exposes `channel` (`EXECUTION` or `DATA`), exact nominal `valueType`, direction,
+cardinality, required state, stable order, source range, inline literal/default metadata, connected
+state, editability, resource kind, and signed compatibility metadata on every port. Execution pins
+are triangular and data pins are circular. Data wires require exact nominal types; explicit
+converter nodes are the only coercion. Input and Output boundary cards are synthetic and cannot be
+deleted. A `run-script` card derives typed inputs and outputs from its target signature.
+
+Signature rename and deletion update the declaration, boundary wires, every `run-script.inputs`
+binding, and caller data endpoints in one revision. Reorder preserves mapping entry bytes. Type
+changes fail closed while incompatible wires remain. Unknown fields, comments, quoting, tags, and
+neighboring scripts remain byte-for-byte unchanged by bounded mutations.
 
 | Step | Card/pins | Fields and nested graphs | Mutations |
 | --- | --- | --- | --- |
@@ -212,4 +227,3 @@ would move, replace, normalize, or implicitly drop fallback content is rejected 
 Every request includes graph contract version, expected document digest/base revision,
 bounded operations, and target stable/YAML IDs. Every successful response includes
 raw content, parsed document, rebuilt projection, affected paths, and new digest.
-

@@ -73,6 +73,8 @@ public final class EditorMetadataService {
     private static String key(UUID id){return "editor:metadata:"+id;}
     private static String revisionKey(UUID id){return "editor:metadata-revision:"+id;}
     public Optional<String> currentRevision(UUID sessionId){return state.get(revisionKey(sessionId));}
+    /** Internal read for an already authenticated session-scoped controller. */
+    public Optional<EditorMetadataSnapshot> current(UUID sessionId){return state.get(key(sessionId)).map(this::read);}
     private static boolean blank(String... values){return Arrays.stream(values).anyMatch(value->value==null||value.isBlank());}
     private static byte[] decode(String value){try{return Base64.getDecoder().decode(value);}catch(IllegalArgumentException e){throw bad(HttpStatus.BAD_REQUEST,"Invalid installation public key");}}
     private static boolean verify(PublicKey key,String input,String encoded){try{Signature signature=Signature.getInstance("Ed25519");signature.initVerify(key);signature.update(input.getBytes(StandardCharsets.UTF_8));return signature.verify(Base64.getDecoder().decode(encoded));}catch(GeneralSecurityException|IllegalArgumentException e){return false;}}

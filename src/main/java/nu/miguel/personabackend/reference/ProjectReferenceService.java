@@ -107,6 +107,7 @@ public final class ProjectReferenceService {
             output.add(new ProjectReference(effectiveOwner.type(), effectiveOwner.id(), targetType, node.value(), file.path(), node.path(),
                     node.startLine(), node.startColumn(), targets.contains(targetType + "\0" + node.value())));
         }
+        if("mapping".equals(node.kind())){YamlDocumentNode nodeType=child(node,"type"),valueType=child(node,"value-type"),value=child(node,"value");if(nodeType!=null&&"value".equals(nodeType.value())&&valueType!=null&&value!=null&&validType(valueType.value())&&validId(value.value()))output.add(new ProjectReference(effectiveOwner.type(),effectiveOwner.id(),valueType.value(),value.value(),file.path(),value.path(),value.startLine(),value.startColumn(),targets.contains(valueType.value()+"\0"+value.value())));YamlDocumentNode parameterType=child(node,"type"),defaultValue=child(node,"default");if(defaultValue!=null&&parameterType!=null&&validType(parameterType.value())&&validId(defaultValue.value()))output.add(new ProjectReference(effectiveOwner.type(),effectiveOwner.id(),parameterType.value(),defaultValue.value(),file.path(),defaultValue.path(),defaultValue.startLine(),defaultValue.startColumn(),targets.contains(parameterType.value()+"\0"+defaultValue.value())));}
         for (YamlDocumentNode child : node.children()) collectReferences(file, child, effectiveOwner, targets, output);
     }
 

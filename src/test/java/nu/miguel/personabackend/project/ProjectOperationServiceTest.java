@@ -66,7 +66,12 @@ class ProjectOperationServiceTest {
     }
 
     @Test void duplicatesRenamesAndDeletesReusableScriptsWithoutRewritingNeighbors() {
-        String source = "# scripts header\nscripts:\n  first:\n    # retain this\n    - type: say\n      text: 'hello'\n  untouched:\n    - type: stop\n";
+        String source = "# scripts header\ncontent-version: 2\nscripts:\n  first:\n"
+                + "    # retain this\n    inputs: {}\n    outputs: {}\n"
+                + "    nodes:\n      say: { type: say, text: 'hello' }\n"
+                + "    connections:\n      enter: { from: $input.exec, to: say.exec }\n"
+                + "      leave: { from: say.success, to: $output.exec }\n"
+                + "  untouched:\n    inputs: {}\n    outputs: {}\n    nodes: {}\n    connections: {}\n";
         List<ContentFile> files = List.of(file("scripts.yml", source));
         var duplicate = operations.duplicate(new ProjectDuplicateRequest(files, revision(files), "script",
                 "first", "second", "scripts.yml"));
@@ -85,10 +90,17 @@ class ProjectOperationServiceTest {
     }
 
     @Test void createsFirstReusableScriptInsideAnExistingEmptyMapping() {
-        List<ContentFile> files = List.of(file("scripts.yml", "# retained\nscripts: {}\n"));
+        List<ContentFile> files = List.of(file("scripts.yml", "# retained\ncontent-version: 2\nscripts: {}\n"));
         var result = operations.create(new ProjectCreateRequest(files, revision(files), "script",
                 "welcome", "scripts.yml", "minimal"));
-        assertEquals("# retained\nscripts: \n  welcome:\n    - type: stop\n\n",
+        assertEquals("# retained\ncontent-version: 2\nscripts: \n  welcome:\n"
+                        + "    inputs: {}\n"
+                        + "    outputs: {}\n"
+                        + "    nodes:\n"
+                        + "      pause: { type: wait, duration: 1ms }\n"
+                        + "    connections:\n"
+                        + "      enter: { from: $input.exec, to: pause.exec }\n"
+                        + "      leave: { from: pause.success, to: $output.exec }\n\n",
                 content(result.files(), "scripts.yml"));
     }
 

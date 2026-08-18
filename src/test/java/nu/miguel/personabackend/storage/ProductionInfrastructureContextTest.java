@@ -97,10 +97,13 @@ class ProductionInfrastructureContextTest {
         SessionVerifyResponse verified=sessions.verify(created.sessionId(),new SessionVerifyRequest(
                 created.verificationCode(),Base64.getEncoder().encodeToString(browserKey.getPublic().getEncoded()),"Integration browser"));
         SocketMessages browserMessages=new SocketMessages();
-        java.net.http.WebSocket browser=HttpClient.newHttpClient().newWebSocketBuilder().buildAsync(
-                URI.create("ws://localhost:"+port+"/ws/v1/browser?session="+created.sessionId()+"&lease="+verified.browserLeaseToken()),browserMessages).get(5,TimeUnit.SECONDS);
         java.net.http.WebSocket plugin=HttpClient.newHttpClient().newWebSocketBuilder().header("Authorization","Bearer "+created.pluginLeaseToken()).buildAsync(
                 URI.create("ws://localhost:"+port+"/ws/v1/plugin?session="+created.sessionId()),new SocketMessages()).get(5,TimeUnit.SECONDS);
+        long presenceDeadline=System.nanoTime()+TimeUnit.SECONDS.toNanos(5);
+        while(!coordination.isConnected(RelaySocketHandler.Role.PLUGIN,created.sessionId())&&System.nanoTime()<presenceDeadline)Thread.sleep(10);
+        assertTrue(coordination.isConnected(RelaySocketHandler.Role.PLUGIN,created.sessionId()),"Plugin presence was not registered");
+        java.net.http.WebSocket browser=HttpClient.newHttpClient().newWebSocketBuilder().buildAsync(
+                URI.create("ws://localhost:"+port+"/ws/v1/browser?session="+created.sessionId()+"&lease="+verified.browserLeaseToken()),browserMessages).get(5,TimeUnit.SECONDS);
         plugin.sendText(json.writeValueAsString(signed(installation.getPrivate(),created.sessionId(),1)),true).get(5,TimeUnit.SECONDS);
         assertEquals(Protocol.HEARTBEAT,awaitType(browserMessages,Protocol.HEARTBEAT));
         browser.sendClose(java.net.http.WebSocket.NORMAL_CLOSURE,"reconnect").get(5,TimeUnit.SECONDS);

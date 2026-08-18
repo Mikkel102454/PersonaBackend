@@ -2,10 +2,15 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createWorkspaceState } from '../../main/resources/static/editor/modules/workspace-state.js';
 import { liveNodeKeys } from '../../main/resources/static/editor/modules/live-overlays.js';
-import { nestedProjection } from '../../main/resources/static/editor/modules/graph-projection.js';
+import { nestedProjection, normalizeProjection } from '../../main/resources/static/editor/modules/graph-projection.js';
 import { publicationReady, validationHeading, diagnosticLabel } from '../../main/resources/static/editor/modules/validation.js';
 import { deterministicLayout, normalizeViewport } from '../../main/resources/static/editor/modules/graph-layout.js';
 import { defaultNodeRenderers } from '../../main/resources/static/editor/modules/node-renderer.js';
+import { GraphSelection } from '../../main/resources/static/editor/modules/graph-selection.js';
+import { fitViewport } from '../../main/resources/static/editor/modules/graph-viewport.js';
+import { connectionsForNode } from '../../main/resources/static/editor/modules/graph-connections.js';
+import { boundedResources, resourceMatches } from '../../main/resources/static/editor/modules/content-browser.js';
+import { closeTabsToRight, reorderTabs } from '../../main/resources/static/editor/modules/resource-tabs.js';
 
 test('keeps normalized editor domains separate and bounds forged viewport metadata', () => {
   const state = createWorkspaceState();
@@ -45,6 +50,29 @@ test('uses one renderer interface for built-in, custom, and schema-owned nodes a
   assert.deepEqual(renderers.describeNode({ title: 'Wait', kind: 'wait' }).classes, []);
   assert.ok(renderers.describeNode({ title: 'Wave', kind: 'action', extensionOwner: 'vendor' }).badges.includes('vendor'));
   assert.ok(renderers.describeNode({ title: 'Raw', kind: 'custom-yaml', custom: true }).badges.includes('custom data'));
+  assert.deepEqual(renderers.describeNode({ title: 'New line', kind: 'script-say' }),
+    { title: 'Say line', subtitle: 'New line', classes: [], badges: [] });
   assert.match(renderers.describePin({ direction: 'input', label: 'in', semanticType: 'execution',
     cardinality: 'single', required: true }).ariaLabel, /required/);
+});
+
+test('fails closed on unsupported projection protocols and normalizes v3 ports', () => {
+  assert.throws(() => normalizeProjection({ graphVersion: 2, nodes: [] }), /Unsupported graph projection version/);
+  const projection = normalizeProjection({ graphVersion: 3, nodes: [{ id: 'node', pins: [{ id: 'in', nodeId: 'node',
+    direction: 'INPUT', cardinality: 'EXACTLY_ONE' }] }], ports: [] });
+  assert.equal(projection.nodes[0].pins[0].direction, 'input');
+  assert.equal(projection.nodes[0].pins[0].cardinality, 'single');
+});
+
+test('keeps extracted graph and shell helpers bounded and deterministic', () => {
+  const selection = new GraphSelection(['a', 'b'], 2); selection.add('c');
+  assert.deepEqual([...selection], ['a', 'b']); selection.retain(new Set(['b'])); assert.deepEqual([...selection], ['b']);
+  assert.deepEqual(fitViewport([{ x: 0, y: 0 }], 800, 600), { zoom: 1.5, x: 40, y: 40 });
+  const projection = { ports: [{ id: 'a:out', nodeId: 'a' }, { id: 'b:in', nodeId: 'b' }],
+    edges: [{ sourcePinId: 'a:out', targetPinId: 'b:in' }] };
+  assert.equal(connectionsForNode(projection, 'a').length, 1);
+  assert.equal(resourceMatches({ search: 'quest demo:path' }, 'demo:path'), true);
+  assert.equal(boundedResources(Array.from({ length: 250 }), 1).length, 200);
+  assert.deepEqual(reorderTabs(['a', 'b', 'c'], 'a', 2), ['b', 'c', 'a']);
+  assert.deepEqual(closeTabsToRight(['a', 'b', 'c'], 1), { kept: ['a', 'b'], closed: ['c'] });
 });

@@ -8,9 +8,18 @@
   <script type="module" src="/editor/app.js"></script>
 </head>
 <body>
-  <header>
-    <h1>Persona Editor</h1>
-    <p id="status" role="status"></p>
+  <header class="global-toolbar">
+    <h1>Persona</h1>
+    <span class="project-identity" aria-label="Current project">Visual Editor</span>
+    <div class="global-actions" aria-label="Global editor actions">
+      <span id="global-save" aria-label="Save state">Saved</span>
+      <button id="global-create" type="button" aria-label="Create from global toolbar">Create</button>
+      <button id="global-validate" type="button">Validate</button>
+      <button id="global-preview" type="button">Preview</button>
+      <button id="global-search" type="button" title="Quick open (Ctrl/Cmd+P)">Search</button>
+      <button id="global-session" type="button">Session</button>
+    </div>
+    <p id="status" role="status" aria-live="polite"></p>
   </header>
 
   <section id="connect" class="panel">
@@ -30,6 +39,12 @@
   </section>
 
   <main id="workspace" hidden>
+    <nav id="navigation-rail" aria-label="Project views">
+      <button id="rail-library" type="button" class="active" aria-current="page" aria-label="Library" title="Library">L</button>
+      <button id="rail-bookmarks" type="button" aria-label="Bookmarks" title="Bookmarks">★</button>
+      <button id="rail-recents" type="button" aria-label="Recents" title="Recents">↺</button>
+      <button id="rail-relationship-map" type="button" aria-label="Open reference graph" title="Relationship Map">R</button>
+    </nav>
     <nav id="content-browser" aria-label="Content Browser">
       <div class="nav-heading">
         <h2>Content Browser</h2>
@@ -74,7 +89,7 @@
       </div>
       <div class="split">
         <section class="visual-pane" aria-label="Visual editor">
-          <div class="mode-heading"><strong>Node graph</strong><span class="view-toggle" role="group" aria-label="Editor view"><button id="view-visual" type="button" aria-pressed="false">Visual</button><button id="view-split" type="button" aria-pressed="true">Split</button><button id="view-yaml" type="button" aria-pressed="false">YAML</button></span><span>Raw YAML remains authoritative.</span></div>
+          <div class="mode-heading"><strong>Node graph</strong><span class="view-toggle" role="group" aria-label="Editor view"><button id="view-visual" type="button" aria-pressed="true">Visual</button><button id="view-split" type="button" aria-pressed="false">Split</button><button id="view-yaml" type="button" aria-pressed="false">YAML</button></span><span>Raw YAML remains authoritative.</span></div>
           <div id="graph-toolbar" role="toolbar" aria-label="Graph viewport">
             <button id="graph-add" type="button">Add node</button>
             <button id="graph-copy" type="button">Copy node</button>
@@ -83,14 +98,21 @@
             <button id="graph-reset" type="button">Reset view</button>
             <button id="graph-auto-layout" type="button">Auto-layout</button>
             <button id="graph-align-left" type="button">Align left</button>
+            <button id="graph-align-center" type="button">Align center</button>
+            <button id="graph-align-right" type="button">Align right</button>
             <button id="graph-align-top" type="button">Align top</button>
+            <button id="graph-align-middle" type="button">Align middle</button>
+            <button id="graph-align-bottom" type="button">Align bottom</button>
             <button id="graph-distribute-horizontal" type="button">Distribute horizontally</button>
             <button id="graph-distribute-vertical" type="button">Distribute vertically</button>
+            <button id="graph-snap" type="button">Snap selection</button>
+            <button id="graph-tidy" type="button">Tidy selection</button>
             <button id="graph-comment" type="button">Comment</button>
             <button id="graph-group" type="button">Group</button>
             <button id="graph-color" type="button">Color label</button>
             <button id="graph-focus-upstream" type="button">Focus upstream</button>
             <button id="graph-focus-downstream" type="button">Focus downstream</button>
+            <button id="graph-focus-connected" type="button">Focus connected</button>
             <button id="graph-grid" type="button" aria-pressed="true">Grid</button>
             <output id="graph-zoom" aria-live="polite">100%</output>
           </div>
@@ -100,7 +122,7 @@
               <div id="graph-nodes" class="graph-nodes"></div>
             </div>
             <div id="graph-marquee" hidden></div>
-            <svg id="graph-minimap" class="graph-minimap" aria-label="Graph minimap"></svg>
+            <svg id="graph-minimap" class="graph-minimap" role="application" tabindex="0" aria-label="Graph minimap. Click or drag to pan; use arrow keys to pan the canvas."></svg>
             <p id="graph-empty" hidden>No safely representable graph nodes are available. Use the structured fallback or YAML.</p>
           </div>
           <div id="graph-stale" hidden role="alert">The YAML is invalid. This is the last valid graph and visual editing is disabled.</div>
@@ -116,12 +138,20 @@
           </section>
           <details id="structured-fallback"><summary>Structured YAML fallback</summary><div id="visual"></div></details>
         </section>
-        <div id="source-resizer" class="panel-resizer" role="separator" aria-label="Resize Details panel" aria-orientation="vertical" tabindex="0"></div>
-        <aside id="inspector" class="inspector-pane" aria-label="Details and Inspector"><div class="mode-heading"><strong>Details</strong><span id="inspector-selection">Nothing selected</span></div><div id="inspector-content"><p>Select a node to inspect its source-mapped properties.</p></div></aside>
+        <div id="source-resizer" class="panel-resizer" role="separator" aria-label="Resize Inspector" aria-orientation="vertical" tabindex="0"></div>
+        <aside id="inspector" class="inspector-pane" aria-label="Inspector">
+          <div class="panel-tabs">
+            <span role="tablist" aria-label="Details panel"><button type="button" role="tab" aria-selected="true" data-inspector-tab="inspector">Inspector</button><button type="button" role="tab" aria-selected="false" data-inspector-tab="history">History</button></span>
+            <button id="inspector-toggle" type="button" aria-label="Hide Inspector" aria-expanded="true">›</button>
+          </div>
+          <section data-inspector-panel="inspector"><div class="mode-heading"><strong>Selection</strong><span id="inspector-selection">Nothing selected</span></div><div id="inspector-content"><p>Select a node to inspect its source-mapped properties.</p></div></section>
+          <section data-inspector-panel="history" hidden><div class="mode-heading"><strong>Command history</strong><span>Local and accepted revisions</span></div><ol id="inspector-history"><li>No graph commands yet.</li></ol></section>
+        </aside>
       </div>
+      <div id="output-resizer" class="panel-resizer" role="separator" aria-label="Resize bottom dock" aria-orientation="horizontal" tabindex="0"></div>
       <section id="output-dock" aria-label="Editor output">
-        <div class="output-tabs" role="tablist" aria-label="Output panels"><button type="button" role="tab" aria-selected="true" data-output="yaml">YAML</button><button type="button" role="tab" aria-selected="false" data-output="problems">Problems</button><button type="button" role="tab" aria-selected="false" data-output="references">References</button><button type="button" role="tab" aria-selected="false" data-output="changes">Changes</button><button type="button" role="tab" aria-selected="false" data-output="simulation">Simulation</button><button type="button" role="tab" aria-selected="false" data-output="live">Live</button></div><button id="output-collapse" type="button" aria-expanded="true">Collapse output</button>
-        <section class="source-pane output-panel" data-panel="yaml" aria-label="YAML editor">
+        <div class="output-tabs" role="tablist" aria-label="Output panels"><button type="button" role="tab" aria-selected="false" data-output="problems">Problems</button><button type="button" role="tab" aria-selected="false" data-output="references">References</button><button type="button" role="tab" aria-selected="false" data-output="simulation">Preview</button><button type="button" role="tab" aria-selected="true" data-output="yaml">YAML</button><button type="button" role="tab" aria-selected="false" data-output="changes">Changes</button><button type="button" role="tab" aria-selected="false" data-output="live">Live</button></div><button id="output-collapse" type="button" aria-expanded="false">Expand output</button>
+        <section class="source-pane output-panel" data-panel="yaml" aria-label="YAML editor" hidden>
           <div class="mode-heading"><strong>YAML</strong><span>Authoritative source</span></div>
           <textarea id="source" spellcheck="false" disabled aria-label="YAML source"></textarea>
           <pre id="diff" hidden aria-label="Textual changes"></pre>
@@ -132,6 +162,9 @@
         <section class="output-panel integrated-output" data-panel="simulation" hidden><label>Mock flags, variables, quests, memories, and events (JSON)<textarea id="simulation-dock-input">{"flags":{},"variables":{},"quests":{},"memories":{},"events":[]}</textarea></label><button id="simulation-dock-run" type="button">Run deterministic simulation</button><pre id="simulation-dock-output"></pre></section>
         <section class="output-panel integrated-output" data-panel="live" hidden><p id="live-dock-status">No trusted live subscription.</p><button id="live-dock-subscribe" type="button">Subscribe read only</button><button id="live-dock-expand" type="button">Open live controls</button><ul id="live-dock-list"></ul></section>
       </section>
+      <footer id="workspace-status" aria-label="Workspace status">
+        <span id="status-save">Saved</span><span id="status-validation">Not validated</span><span id="status-connection">Connecting</span><span id="status-capabilities">View only</span><span id="status-revision">Revision —</span><span id="status-live">Live off</span>
+      </footer>
     </section>
   </main>
 

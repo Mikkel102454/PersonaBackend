@@ -1,6 +1,7 @@
 package nu.miguel.personabackend.graph;
 
 import nu.miguel.persona.editor.protocol.ContentFile;
+import nu.miguel.persona.editor.protocol.EditorSchemaDocument;
 import nu.miguel.personabackend.document.YamlDocumentService;
 import nu.miguel.personabackend.project.ProjectContentRules;
 import nu.miguel.personabackend.reference.ProjectReferenceService;
@@ -42,7 +43,8 @@ class GraphMutationServiceTest {
                 request.resourceId(), request.yamlPath(), request.content(), "0".repeat(64),
                 request.projectFiles(), request.operations());
         GraphContractException error = assertThrows(GraphContractException.class, () -> mutations.mutate(staleRequest));
-        assertEquals("STALE_CONTENT", error.code());
+        assertEquals("STALE_PROJECTION", error.code());
+        assertEquals(sha(source), error.currentContentDigest());
         assertEquals(409, error.getStatusCode().value());
         assertEquals(2, projections.project(projectionRequest("behavior", "demo:walk", source)).edges().size());
     }
@@ -62,8 +64,7 @@ class GraphMutationServiceTest {
         assertTrue(duplicated.content().contains("id: duplicate-"));
 
         GraphMutationResponse moved = mutate("behavior", "demo:walk", inserted.content(),
-                op(GraphMutationOperation.Type.REORDER, "/root/children/2", null, "/root/children",
-                        null, null, null, null, null, 0));
+                reorder(inserted.content(), "/root/children/2", "/root/children/0", true));
         assertTrue(moved.content().indexOf("id: second") < moved.content().indexOf("id: first"));
 
         GraphMutationResponse wrapped = mutate("behavior", "demo:walk", source,
@@ -85,8 +86,8 @@ class GraphMutationServiceTest {
         EditorGraphProjection graph = projections.project(projectionRequest("behavior", "demo:walk", source));
         var branch = graph.nodes().stream().filter(node -> node.title().equals("branch")).findFirst().orElseThrow();
         var spare = graph.nodes().stream().filter(node -> node.title().equals("spare")).findFirst().orElseThrow();
-        String output = branch.pins().stream().filter(pin -> pin.direction().equals("output")).findFirst().orElseThrow().id();
-        String input = spare.pins().stream().filter(pin -> pin.direction().equals("input")).findFirst().orElseThrow().id();
+        String output = branch.pins().stream().filter(pin -> pin.direction().equals("OUTPUT")).findFirst().orElseThrow().id();
+        String input = spare.pins().stream().filter(pin -> pin.direction().equals("INPUT")).findFirst().orElseThrow().id();
         GraphMutationResponse connected = mutate("behavior", "demo:walk", source,
                 op(GraphMutationOperation.Type.CONNECT, null, null, null, output, input,
                         null, null, null, 1));
@@ -94,11 +95,12 @@ class GraphMutationServiceTest {
         assertTrue(connected.content().contains("        - id: spare\n          type: wait"));
 
         var leaf = graph.nodes().stream().filter(node -> node.title().equals("leaf")).findFirst().orElseThrow();
-        String leafOutput = leaf.pins().stream().filter(pin -> pin.direction().equals("output")).findFirst().orElseThrow().id();
+        assertTrue(leaf.pins().stream().noneMatch(pin -> pin.direction().equals("OUTPUT")),
+                "Leaf outcomes are status only unless the schema declares a branch");
         GraphContractException invalid = assertThrows(GraphContractException.class, () -> mutate("behavior", "demo:walk", source,
-                op(GraphMutationOperation.Type.CONNECT, null, null, null, leafOutput, input,
+                op(GraphMutationOperation.Type.CONNECT, null, null, null, leaf.id() + ":out:forged", input,
                         null, null, null, null)));
-        assertEquals("INVALID_PARENT_NODE", invalid.code());
+        assertEquals("PIN_NOT_FOUND", invalid.code());
     }
 
     @Test void connectsAndDisconnectsExplicitDialogueTransfers() {
@@ -106,8 +108,8 @@ class GraphMutationServiceTest {
         EditorGraphProjection graph = projections.project(projectionRequest("dialogue", "demo:talk", source));
         var first = graph.nodes().stream().filter(node -> node.title().equals("first")).findFirst().orElseThrow();
         var second = graph.nodes().stream().filter(node -> node.title().equals("second")).findFirst().orElseThrow();
-        String output = first.pins().stream().filter(pin -> pin.direction().equals("output")).findFirst().orElseThrow().id();
-        String input = second.pins().stream().filter(pin -> pin.direction().equals("input")).findFirst().orElseThrow().id();
+        String output = first.pins().stream().filter(pin -> pin.direction().equals("OUTPUT")).findFirst().orElseThrow().id();
+        String input = second.pins().stream().filter(pin -> pin.direction().equals("INPUT")).findFirst().orElseThrow().id();
         GraphMutationResponse connected = mutate("dialogue", "demo:talk", source,
                 op(GraphMutationOperation.Type.CONNECT, null, null, null, output, input,
                         null, null, null, null));
@@ -149,7 +151,7 @@ class GraphMutationServiceTest {
                 "behavior", "demo:walk", behavior(), op(GraphMutationOperation.Type.INSERT, null, null,
                         "/root/children", null, null, "extension-action", "safe",
                         "vendor:wave\nowned: true", 0)));
-        assertEquals("UNSUPPORTED_NODE_KIND", injected.code());
+        assertEquals("UNSIGNED_EXTENSION_SCHEMA", injected.code());
     }
 
     @Test void rejectsCyclesCardinalityViolationsAndCustomYamlTargetsWithPreciseCodes() {
@@ -159,8 +161,8 @@ class GraphMutationServiceTest {
         var branch = graph.nodes().stream().filter(node -> node.title().equals("branch")).findFirst().orElseThrow();
         GraphContractException cycle = assertThrows(GraphContractException.class, () -> mutate("behavior", "demo:walk", behavior,
                 op(GraphMutationOperation.Type.CONNECT, null, null, null,
-                        branch.pins().stream().filter(pin -> pin.direction().equals("output")).findFirst().orElseThrow().id(),
-                        root.pins().stream().filter(pin -> pin.direction().equals("input")).findFirst().orElseThrow().id(),
+                        branch.pins().stream().filter(pin -> pin.direction().equals("OUTPUT")).findFirst().orElseThrow().id(),
+                        branch.pins().stream().filter(pin -> pin.direction().equals("INPUT")).findFirst().orElseThrow().id(),
                         null, null, null, null)));
         assertEquals("CYCLE_NOT_ALLOWED", cycle.code());
 
@@ -169,15 +171,15 @@ class GraphMutationServiceTest {
         assertEquals("NODE_NOT_EDITABLE", custom.code());
         assertEquals("/custom", custom.yamlPath());
 
-        String scripts = "scripts:\n  flow:\n    - type: wait\n      duration: 1s\n    - type: stop\n";
+        String scripts = "content-version: 2\nscripts:\n  flow:\n    inputs: {}\n    outputs: {}\n    nodes:\n      wait: { type: wait, duration: 1s }\n    connections:\n      enter: { from: $input.exec, to: wait.exec }\n      leave: { from: wait.success, to: $output.exec }\n";
         EditorGraphProjection scriptGraph = projections.project(projectionRequest("script", "flow", scripts));
-        var scriptRoot = scriptGraph.nodes().stream().filter(node -> node.kind().equals("reusable-script")).findFirst().orElseThrow();
-        var second = scriptGraph.nodes().stream().filter(node -> node.yamlPath().endsWith("/1")).findFirst().orElseThrow();
+        var scriptRoot = scriptGraph.nodes().stream().filter(node -> node.kind().equals("script-input")).findFirst().orElseThrow();
+        var second = scriptGraph.nodes().stream().filter(node -> node.title().equals("wait")).findFirst().orElseThrow();
         GraphContractException cardinality = assertThrows(GraphContractException.class, () -> mutate("script", "flow", scripts,
                 op(GraphMutationOperation.Type.CONNECT, null, null, null,
-                        scriptRoot.pins().stream().filter(pin -> pin.direction().equals("output")).findFirst().orElseThrow().id(),
-                        second.pins().stream().filter(pin -> pin.direction().equals("input")).findFirst().orElseThrow().id(),
-                        null, null, null, null)));
+                        scriptRoot.pins().stream().filter(pin -> pin.direction().equals("OUTPUT")).findFirst().orElseThrow().id(),
+                        second.pins().stream().filter(pin -> pin.direction().equals("INPUT")).findFirst().orElseThrow().id(),
+                        null, "duplicate", null, null)));
         assertEquals("CARDINALITY_EXCEEDED", cardinality.code());
     }
 
@@ -268,12 +270,115 @@ class GraphMutationServiceTest {
                 op(GraphMutationOperation.Type.INSERT, null, null, "/on-interact", null, null,
                         "extension-command", null, "vendor:golden", null)), "npc lifecycle");
 
-        String scripts = "# golden\nscripts:\n  flow: []\nsentinel: !vendor keep\n";
-        for (String kind : List.of("say", "wait", "if", "choice", "random", "run-script", "goto", "stop",
-                "extension-command"))
-            assertGolden(mutate("script", "flow", scripts,
-                    op(GraphMutationOperation.Type.INSERT, null, null, "/scripts/flow", null, null,
-                            kind, null, kind.equals("extension-command") ? "vendor:golden" : null, null)), kind);
+        String scripts = "# golden\ncontent-version: 2\nscripts:\n  flow:\n    inputs: {}\n    outputs: {}\n    nodes: {}\n    connections: {}\nsentinel: !vendor keep\n";
+        GraphMutationOperation value=new GraphMutationOperation(GraphMutationOperation.Type.CREATE_VALUE_NODE,null,null,null,null,null,null,"answer","true",null,null,null,null,null,null,null,null,null,List.of(),"boolean",null,null,null,null);
+        assertGolden(mutate("script","flow",scripts,value),"value");
+    }
+
+    @Test void scriptParameterRenameIsAtomicAcrossProjectCallSites() {
+        String scripts = "content-version: 2\nscripts:\n"
+                + "  flow:\n    inputs:\n      who: { type: text, required: true }\n"
+                + "    outputs: {}\n    nodes:\n      say: { type: say, text: placeholder }\n"
+                + "    connections:\n      enter: { from: $input.exec, to: say.exec }\n"
+                + "      data: { from: $input.who, to: say.text }\n"
+                + "      leave: { from: say.success, to: $output.exec }\n"
+                + "  caller:\n    inputs: {}\n    outputs: {}\n    nodes:\n"
+                + "      call:\n        type: run-script\n        script: flow\n        inputs:\n          who: 'Alex' # keep style\n"
+                + "    connections: {}\n";
+        String quest = "id: demo:quest\nphases:\n  - id: start\n    on-start:\n"
+                + "      - type: run-script\n        script: flow\n        inputs:\n          who: Steve # neighbor\n";
+        List<ContentFile> files = List.of(file("scripts.yml", scripts), file("quests/demo.yml", quest));
+        GraphMutationOperation rename = new GraphMutationOperation(
+                GraphMutationOperation.Type.RENAME_SCRIPT_PARAMETER, null, null,
+                "/scripts/flow/inputs", null, null, null, null, null, null, null,
+                null, null, null, null, null, null, null, List.of(),
+                null, null, null, "who", "recipient");
+        GraphMutationResponse result = mutations.mutate(new GraphMutationRequest(EditorGraphProjection.VERSION,
+                "scripts.yml", "script", "flow", "/scripts/flow", scripts, sha(scripts), files, List.of(rename)));
+        String updatedScripts = result.rawFiles().stream().filter(file -> file.path().equals("scripts.yml"))
+                .findFirst().orElseThrow().content();
+        String updatedQuest = result.rawFiles().stream().filter(file -> file.path().equals("quests/demo.yml"))
+                .findFirst().orElseThrow().content();
+        assertTrue(updatedScripts.contains("recipient: { type: text, required: true }"));
+        assertTrue(updatedScripts.contains("from: \"$input.recipient\""));
+        assertTrue(updatedScripts.contains("recipient: 'Alex' # keep style"));
+        assertTrue(updatedQuest.contains("recipient: Steve # neighbor"));
+        assertFalse(updatedScripts.contains("who:"));
+        assertFalse(updatedQuest.contains("who:"));
+        assertEquals(2, result.patches().stream().map(GraphMutationResponse.SourcePatch::filePath).distinct().count());
+    }
+
+    @Test void explicitCompoundIsAtomicReturnsMinimalPatchAndBoundsNestedChildren() {
+        String source = behavior();
+        GraphMutationOperation compound = new GraphMutationOperation(GraphMutationOperation.Type.COMPOUND,
+                null, null, null, null, null, null, null, null, null, null,
+                "compound-1", null, null, null, null, null, null, List.of(
+                op(GraphMutationOperation.Type.EDIT_FIELD, "/root/children/0/duration", null, null,
+                        null, null, null, null, "3s", null),
+                reorder(source, "/root/children/1", "/root/children/0", true)));
+        GraphMutationResponse result = mutations.mutate(request("behavior", "demo:walk", source, List.of(compound)));
+        assertEquals(2, result.appliedOperationCount());
+        assertEquals(2, result.patches().size());
+        String rebuilt = source;
+        for (GraphMutationResponse.SourcePatch patch : result.patches())
+            rebuilt = rebuilt.substring(0, patch.beforeStartOffset()) + patch.after()
+                    + rebuilt.substring(patch.beforeEndOffset());
+        assertEquals(result.content(), rebuilt);
+        assertTrue(result.content().startsWith("# retained project comment\n"));
+        assertTrue(result.content().endsWith("extension: !vendor exact\n"));
+
+        GraphMutationOperation unsafe = new GraphMutationOperation(GraphMutationOperation.Type.COMPOUND,
+                null, null, null, null, null, null, null, null, null, null,
+                "compound-2", null, null, null, null, null, null, List.of(
+                op(GraphMutationOperation.Type.EDIT_FIELD, "/root/children/0/duration", null, null,
+                        null, null, null, null, "9s", null),
+                op(GraphMutationOperation.Type.DELETE, "/extension", null, null,
+                        null, null, null, null, null, null)));
+        assertThrows(GraphContractException.class,
+                () -> mutations.mutate(request("behavior", "demo:walk", source, List.of(unsafe))));
+        assertEquals("1s", find(documents.parse(source).root(), "/root/children/0/duration").value());
+    }
+
+    @Test void returnsCreatedStableIdentityForOperationFocusRestoration() {
+        String operationId = "insert-focus";
+        GraphMutationOperation insert = new GraphMutationOperation(GraphMutationOperation.Type.INSERT,
+                null, null, "/root/children", null, null, "wait", "focused", null, 0, null,
+                operationId, null, null, null, null, null, null, List.of());
+        GraphMutationResponse result = mutate("behavior", "demo:walk", behavior(), insert);
+        assertEquals("behavior:demo:walk#focused", result.identityRemap().get(operationId));
+        assertTrue(result.projection().nodes().stream().anyMatch(node -> node.id().equals(result.identityRemap().get(operationId))));
+    }
+
+    @Test void reorderNeverTrustsAnArrayIndexWithoutStableParentAndNeighborPorts() {
+        GraphContractException rejected = assertThrows(GraphContractException.class, () -> mutate(
+                "behavior", "demo:walk", behavior(),
+                op(GraphMutationOperation.Type.REORDER, "/root/children/1", "/root/children/0",
+                        "/root/children", null, null, null, null, null, 0)));
+        assertEquals("REORDER_PARENT_PORT_REQUIRED", rejected.code());
+    }
+
+    @Test void reconnectAtomicallyReplacesDialogueTargetAndUnsignedInsertFailsClosed() {
+        String source = "id: demo:talk\nstart: first\nnodes:\n  first:\n    script:\n      - type: goto\n        node: second\n  second:\n    script:\n      - type: end-dialogue\n  third:\n    script:\n      - type: end-dialogue\n";
+        EditorGraphProjection graph = projections.project(projectionRequest("dialogue", "demo:talk", source));
+        EditorGraphProjection.GraphEdge edge = graph.edges().stream().filter(value -> value.label().equals("transfer"))
+                .findFirst().orElseThrow();
+        EditorGraphProjection.GraphNode third = graph.nodes().stream().filter(node -> node.title().equals("third"))
+                .findFirst().orElseThrow();
+        String target = third.pins().stream().filter(pin -> pin.direction().equals("INPUT")
+                && pin.semanticType().equals("dialogue-flow")).findFirst().orElseThrow().id();
+        GraphMutationOperation reconnect = new GraphMutationOperation(GraphMutationOperation.Type.RECONNECT,
+                edge.sourceYamlPath(), null, null, edge.sourcePinId(), target, null, null, null, null, null,
+                "reconnect-1", null, edge.id(), null, null, null, null, List.of());
+        GraphMutationResponse result = mutate("dialogue", "demo:talk", source, reconnect);
+        assertTrue(result.content().contains("node: \"third\""));
+        assertFalse(result.content().contains("node: second"));
+        assertEquals(1, result.appliedOperationCount());
+
+        GraphContractException unsigned = assertThrows(GraphContractException.class, () -> mutations.mutate(
+                request("behavior", "demo:walk", behavior(), List.of(op(GraphMutationOperation.Type.INSERT,
+                        null, null, "/root/children", null, null, "extension-action", "unsigned",
+                        "vendor:unknown", 0)))));
+        assertEquals("UNSIGNED_EXTENSION_SCHEMA", unsigned.code());
     }
 
     private static void assertGolden(GraphMutationResponse result, String label) {
@@ -283,7 +388,21 @@ class GraphMutationServiceTest {
     }
 
     private GraphMutationResponse mutate(String kind, String id, String source, GraphMutationOperation... operations) {
-        return mutations.mutate(request(kind, id, source, List.of(operations)));
+        List<EditorSchemaDocument> schemas = Arrays.stream(operations)
+                .filter(operation -> operation.nodeKind() != null && operation.nodeKind().startsWith("extension-")
+                        && operation.value() != null && operation.value().matches("[a-z0-9_.-]+:[a-z0-9_.-]+"))
+                .map(operation -> new EditorSchemaDocument(extensionContentType(operation.nodeKind()), operation.value(),
+                        operation.value().substring(0, operation.value().indexOf(':')), "1", "{}", sha("{}")))
+                .toList();
+        return mutations.mutate(request(kind, id, source, List.of(operations)), schemas, "signed-test");
+    }
+    private static String extensionContentType(String nodeKind) {
+        return switch (nodeKind) {
+            case "extension-action" -> "behavior-action";
+            case "extension-condition" -> "behavior-condition";
+            case "extension-objective" -> "objective";
+            default -> "command";
+        };
     }
     private static GraphMutationRequest request(String kind, String id, String source,
                                                 List<GraphMutationOperation> operations) {
@@ -301,6 +420,21 @@ class GraphMutationServiceTest {
                                              String key, String value, Integer index) {
         return new GraphMutationOperation(type, yamlPath, targetYamlPath, parentYamlPath,
                 sourcePin, targetPin, nodeKind, key, value, index, null);
+    }
+    private GraphMutationOperation reorder(String source, String sourcePath, String neighborPath, boolean before) {
+        EditorGraphProjection graph = projections.project(projectionRequest("behavior", "demo:walk", source));
+        var neighbor = graph.nodes().stream().filter(node -> neighborPath.equals(node.yamlPath()))
+                .findFirst().orElseThrow();
+        var sourceNode = graph.nodes().stream().filter(node -> sourcePath.equals(node.yamlPath()))
+                .findFirst().orElseThrow();
+        String port = neighbor.pins().stream().filter(pin -> "INPUT".equals(pin.direction()))
+                .findFirst().orElseThrow().id();
+        String parentPort = graph.ports().stream().filter(pin -> "/root/children".equals(pin.yamlPath())
+                && "+ child".equals(pin.label())).findFirst().orElseThrow().id();
+        return new GraphMutationOperation(GraphMutationOperation.Type.REORDER, sourcePath, neighborPath,
+                "/root/children", null, null, null, null, null, null, null,
+                UUID.randomUUID().toString(), sourceNode.id(), null, parentPort,
+                before ? port : null, before ? null : port, sourceNode.range(), List.of());
     }
     private static String behavior() {
         return "# retained project comment\nid: demo:walk\nscope: player\nroot:\n  id: root\n  type: sequence\n  children:\n    - id: first\n      type: wait\n      duration: '1s'\n    - id: second\n      type: action\n      action: set-visible\n      visible: true\nextension: !vendor exact\n";

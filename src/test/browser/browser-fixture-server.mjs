@@ -17,7 +17,7 @@ function template(kind, id) {
   if (kind === 'dialogue') return `id: ${id}\nstart: start\nnodes:\n  start:\n    script:\n      - type: say\n        text: "New dialogue line"\n      - type: end-dialogue\n`;
   if (kind === 'quest') return `id: ${id}\ntitle: "New quest"\nphases:\n  - id: start\n    objectives:\n      - id: begin\n        type: wait\n        duration: 1s\n`;
   if (kind === 'npc') return `id: ${id}\ndisplay-name: "New NPC"\n`;
-  return `scripts:\n  ${id}:\n    - type: stop\n`;
+  return `content-version: 2\nscripts:\n  ${id}:\n    inputs: {}\n    outputs: {}\n    nodes:\n      pause: { type: wait, duration: 1ms }\n    connections:\n      enter: { from: $input.exec, to: pause.exec }\n      leave: { from: pause.success, to: $output.exec }\n`;
 }
 
 const sha = content => createHash('sha256').update(content).digest('hex');
@@ -81,12 +81,12 @@ function projection(request) {
   const rootRange = sourceRange(content, request.resourceKind === 'behavior' ? 'id: root' : request.resourceId);
   const makePin = (nodeId, direction, label, type = 'execution') => ({
     id: direction === 'input' ? nodeId + ':in' : nodeId + ':out:' + label,
-    nodeId, direction, semanticType: type, cardinality: 'many', required: false, label, yamlPath: request.yamlPath || ''
+    nodeId, direction, channel: type.startsWith('reference:') ? 'DATA' : 'EXECUTION', valueType: type.startsWith('reference:') ? type.slice(10) : 'execution', semanticType: type, cardinality: 'many', required: false, label, yamlPath: request.yamlPath || ''
   });
   if (request.resourceKind === 'quest') {
     const center = id + '#quest', phase = id + '#start', objective = id + '#begin';
     const pin = (nodeId, direction, label, type) => ({ id: nodeId + (direction === 'input' ? ':in' : ':out:' + label),
-      nodeId, direction, semanticType: type, cardinality: direction === 'input' ? 'single' : 'many',
+      nodeId, direction, channel: 'EXECUTION', valueType: 'execution', semanticType: type, cardinality: direction === 'input' ? 'single' : 'many',
       required: direction === 'input', label, yamlPath: '' });
     const nodes = [
       { id: center, yamlPath: '', range: sourceRange(content, request.resourceId), kind: 'quest', title: request.resourceId,
@@ -97,7 +97,7 @@ function projection(request) {
       { id: objective, yamlPath: '/phases/0/objectives/0', range: sourceRange(content, 'id: begin'), kind: 'quest-objective', title: 'begin',
         subtitle: 'wait', fields: [], pins: [pin(objective, 'input', 'phase', 'objective')], badges: [], custom: false, extensionOwner: null }
     ];
-    return { graphVersion: 1, resourceIdentity: id, resourceKind: 'quest', resourceId: request.resourceId,
+    return { graphVersion: 3, resourceIdentity: id, resourceKind: 'quest', resourceId: request.resourceId,
       filePath: request.path, rootYamlPath: '', contentDigest: digest, editable: true, nodes, edges: [
         { id: 'quest-entry', sourcePinId: center + ':out:entry', targetPinId: phase + ':in', semanticType: 'phase-flow', label: 'entry', sourceYamlPath: '', targetYamlPath: '/phases/0', resolved: true, cyclic: false },
         { id: 'quest-objective', sourcePinId: phase + ':out:objectives', targetPinId: objective + ':in', semanticType: 'objective', label: 'objective', sourceYamlPath: '/phases/0', targetYamlPath: '/phases/0/objectives/0', resolved: true, cyclic: false }],
@@ -113,7 +113,7 @@ function projection(request) {
       { id: end, yamlPath: '/nodes/start/script/1', range: sourceRange(content, '- type: end-dialogue'), kind: 'script-end-dialogue', title: 'end-dialogue', subtitle: 'end-dialogue',
         fields: [], pins: [makePin(end, 'input', 'in')], badges: [], custom: false, extensionOwner: null }
     ];
-    return { graphVersion: 1, resourceIdentity: id, resourceKind: 'dialogue', resourceId: request.resourceId,
+    return { graphVersion: 3, resourceIdentity: id, resourceKind: 'dialogue', resourceId: request.resourceId,
       filePath: request.path, rootYamlPath: '', contentDigest: digest, editable: true, nodes, edges: [
         { id: 'dialogue-say', sourcePinId: entry + ':out:next', targetPinId: say + ':in', semanticType: 'execution', label: 'then', sourceYamlPath: '/nodes/start/script', targetYamlPath: '/nodes/start/script/0', resolved: true, cyclic: false },
         { id: 'dialogue-end', sourcePinId: say + ':out:then', targetPinId: end + ':in', semanticType: 'execution', label: 'then', sourceYamlPath: '/nodes/start/script/0', targetYamlPath: '/nodes/start/script/1', resolved: true, cyclic: false }],
@@ -121,7 +121,7 @@ function projection(request) {
   }
   if (request.resourceKind !== 'behavior') {
     const nodeId = id + '#root';
-    return { graphVersion: 1, resourceIdentity: id, resourceKind: request.resourceKind, resourceId: request.resourceId,
+    return { graphVersion: 3, resourceIdentity: id, resourceKind: request.resourceKind, resourceId: request.resourceId,
       filePath: request.path, rootYamlPath: request.yamlPath || '', contentDigest: digest, editable: true,
       nodes: [{ id: nodeId, yamlPath: request.yamlPath || '', range: rootRange, kind: request.resourceKind,
         title: request.resourceId, subtitle: request.resourceKind, fields: [], pins: [makePin(nodeId, 'input', 'in'), makePin(nodeId, 'output', 'next')],
@@ -134,7 +134,8 @@ function projection(request) {
     { id: rootId, yamlPath: '/root', range: sourceRange(content, 'id: root'), kind: 'sequence', title: 'root', subtitle: 'sequence',
       fields: [{ id: rootId + ':field', label: 'type', yamlPath: '/root/type', range: sourceRange(content, 'sequence'),
         valueType: 'string', value: 'sequence', editable: true, required: false, custom: false }],
-      pins: [makePin(rootId, 'input', 'in'), ...children.map((child, index) => makePin(rootId, 'output', String(index + 1)))],
+      pins: [makePin(rootId, 'input', 'in'), ...children.map((child, index) => makePin(rootId, 'output', String(index + 1))),
+        { ...makePin(rootId, 'output', '+ child'), yamlPath: '/root/children' }],
       badges: [], custom: false, extensionOwner: null },
     ...children.map(child => {
       const childId = id + '#' + child.key, path = `/root/children/${child.index}`;
@@ -149,7 +150,7 @@ function projection(request) {
     { id: customId, yamlPath: '/future', range: sourceRange(content, 'retained'), kind: 'custom-yaml', title: 'Custom YAML · future', subtitle: '!vendor',
       fields: [], pins: [makePin(customId, 'input', 'in', 'custom')], badges: ['custom data'], custom: true, extensionOwner: null }
   ];
-  return { graphVersion: 1, resourceIdentity: id, resourceKind: 'behavior', resourceId: request.resourceId,
+  return { graphVersion: 3, resourceIdentity: id, resourceKind: 'behavior', resourceId: request.resourceId,
     filePath: request.path, rootYamlPath: '', contentDigest: digest, editable: true, nodes,
     edges: children.map((child, index) => ({ id: 'edge-' + (index + 1), sourcePinId: rootId + ':out:' + (index + 1),
       targetPinId: id + '#' + child.key + ':in', semanticType: 'execution', label: String(index + 1),
@@ -210,17 +211,22 @@ const server = http.createServer(async (request, response) => {
     }
     if (url.pathname.endsWith('/documents/mutate')) {
       const input = await body(request);
-      if (input.expectedDigest !== sha(input.content)) {
-        json(response, 409, { code: 'STALE_CONTENT', message: 'Fixture digest conflict', filePath: input.path, yamlPath: input.yamlPath }); return;
+      const expectedDigest = input.expectedContentDigest || input.expectedDigest;
+      const filePath = input.filePath || input.path, rootYamlPath = input.rootYamlPath ?? input.yamlPath;
+      const flatten = values => values.flatMap(operation => ['COMPOUND', 'INSERT_ON_WIRE'].includes(operation.type)
+        ? flatten(operation.children || []) : [operation]);
+      const operations = flatten(input.operations || []);
+      if (expectedDigest !== sha(input.content)) {
+        json(response, 409, { code: 'STALE_PROJECTION', message: 'Fixture digest conflict', filePath, yamlPath: rootYamlPath }); return;
       }
-      if (input.operations?.some(operation => operation.key === 'stale-node')) {
-        json(response, 409, { code: 'STALE_CONTENT', message: 'A newer authoritative digest exists',
-          filePath: input.path, yamlPath: input.yamlPath }); return;
+      if (operations.some(operation => operation.key === 'stale-node')) {
+        json(response, 409, { code: 'STALE_PROJECTION', message: 'A newer authoritative digest exists',
+          filePath, yamlPath: rootYamlPath }); return;
       }
-      if (input.operations?.some(operation => operation.key === 'slow-node'))
+      if (operations.some(operation => operation.key === 'slow-node'))
         await new Promise(resolveDelay => setTimeout(resolveDelay, 300));
       let content = input.content;
-      for (const operation of input.operations || []) {
+      for (const operation of operations) {
         if (operation.type === 'COPY' && operation.parentYamlPath === '/root/children') {
           const sourceFile = input.projectFiles.find(file => file.path === operation.sourceFilePath);
           const sourceId = operation.yamlPath.split('/').at(-1), matches = [...sourceFile.content.matchAll(
@@ -229,6 +235,12 @@ const server = http.createServer(async (request, response) => {
           const block = `    - id: ${operation.key}\n      type: ${copied?.[2] || 'wait'}${duration}\n`;
           content = content.includes('children: []') ? content.replace('children: []', `children:\n${block}`)
             : content.replace('\nfuture:', `\n${block}future:`);
+        } else if (operation.type === 'WRAP' && operation.yamlPath === '/root/children/0') {
+          const original = content.match(/    - id: wait-one\n      type: wait\n      duration: (?:'1s'|1s)(?:[^\n]*)\n/)?.[0];
+          if (original) {
+            const nested = original.split('\n').filter(Boolean).map(line => '    ' + line).join('\n') + '\n';
+            content = content.replace(original, `    - id: ${operation.key}\n      type: ${operation.nodeKind}\n      child:\n${nested}`);
+          }
         } else if (operation.type === 'INSERT' && operation.parentYamlPath === '/root/children') {
           const key = operation.key || 'server-node', type = operation.nodeKind === 'extension-action' ? 'action'
             : operation.nodeKind === 'extension-condition' ? 'condition' : operation.nodeKind;
@@ -244,15 +256,25 @@ const server = http.createServer(async (request, response) => {
             : content.replace('\nfuture:', `\n${block}future:`);
         } else if (operation.type === 'EDIT_FIELD' && operation.yamlPath.endsWith('/duration')) {
           content = content.replace(/duration:\s*[^\s#]+/, 'duration: ' + operation.value);
+        } else if (operation.type === 'REORDER' && operation.parentYamlPath === '/root/children') {
+          const section = content.match(/  children:\n([\s\S]*?)(?=future:)/)?.[1] || '';
+          const blocks = [...section.matchAll(/    - id: [\s\S]*?(?=    - id: |$)/g)].map(match => match[0]);
+          const sourceIndex = Number(operation.yamlPath.split('/').at(-1));
+          const neighborIndex = Number(operation.targetYamlPath.split('/').at(-1));
+          const [moved] = blocks.splice(sourceIndex, 1);
+          let destination = neighborIndex + (operation.afterPortId ? 1 : 0);
+          if (sourceIndex < destination) destination--;
+          blocks.splice(Math.max(0, destination), 0, moved);
+          content = content.replace(section, blocks.join(''));
         } else if (operation.type === 'DISCONNECT') {
           json(response, 422, { code: 'ORPHAN_NOT_ALLOWED', message: 'Behaviour nodes cannot be left disconnected',
-            filePath: input.path, yamlPath: operation.yamlPath }); return;
+            filePath, yamlPath: operation.yamlPath }); return;
         }
       }
       const graph = projection({ ...input, content }), document = documentModel(content);
-      json(response, 200, { previousDigest: input.expectedDigest, contentDigest: sha(content), content, document,
-        projection: graph, affectedPaths: input.operations.map(operation => operation.yamlPath || operation.parentYamlPath).filter(Boolean),
-        appliedOperationCount: input.operations.length }); return;
+      json(response, 200, { previousDigest: expectedDigest, contentDigest: sha(content), content, document,
+        projection: graph, affectedPaths: operations.map(operation => operation.yamlPath || operation.parentYamlPath).filter(Boolean),
+        appliedOperationCount: operations.length }); return;
     }
     if (url.pathname.endsWith('/projects/references')) {
       json(response, 200, { declarations: [
@@ -267,7 +289,7 @@ const server = http.createServer(async (request, response) => {
           { id: id + ':in', nodeId: id, direction: 'input', semanticType: 'reference', cardinality: 'many', required: false, label: 'inbound', yamlPath: '/id' },
           { id: id + ':out:reference', nodeId: id, direction: 'output', semanticType: 'reference', cardinality: 'many', required: false, label: 'references', yamlPath: '/id' }],
         badges: [], custom: false, extensionOwner: null });
-      json(response, 200, { graphVersion: 1, resourceIdentity: 'project:relationship-map', resourceKind: 'relationship',
+      json(response, 200, { graphVersion: 3, resourceIdentity: 'project:relationship-map', resourceKind: 'relationship',
         resourceId: 'project', filePath: '', rootYamlPath: '', contentDigest: input.expectedRevision, editable: false,
         nodes: [node(sourceId, 'demo:walker', 'behaviors/walker.yml'), node(targetId, 'demo:target', 'behaviors/target.yml'),
           { id: missingId, yamlPath: '', range: sourceRange(initialContent, 'demo:walker'), kind: 'missing-reference',
@@ -348,11 +370,12 @@ const server = http.createServer(async (request, response) => {
       const input = await body(request), files = input.files.map(file => ({ ...file }));
       const source = files.find(file => file.path === input.sourcePath);
       const exact = '      - type: say\n        text: "New dialogue line"\n';
-      source.content = source.content.replace(exact, `      - type: run-script\n        script: ${input.scriptId}\n`);
+      source.content = source.content.replace(exact, `      - type: run-script\n        script: ${input.scriptId}\n        inputs: {}\n`);
       source.sha256 = sha(source.content);
       const scripts = files.find(file => file.path === 'scripts.yml');
-      if (scripts) { scripts.content += `  ${input.scriptId}:\n    - type: say\n      text: "New dialogue line"\n`; scripts.sha256 = sha(scripts.content); }
-      else { const content = `scripts:\n  ${input.scriptId}:\n    - type: say\n      text: "New dialogue line"\n`; files.push({ path: 'scripts.yml', content, sha256: sha(content) }); }
+      const descriptor=`  ${input.scriptId}:\n    inputs: {}\n    outputs: {}\n    nodes:\n      entry:\n        type: say\n        text: "New dialogue line"\n    connections:\n      enter: { from: $input.exec, to: entry.exec }\n      leave: { from: entry.success, to: $output.exec }\n`;
+      if (scripts) { scripts.content += descriptor; scripts.sha256 = sha(scripts.content); }
+      else { const content = `content-version: 2\nscripts:\n${descriptor}`; files.push({ path: 'scripts.yml', content, sha256: sha(content) }); }
       json(response, 200, { revision: revision(files), files, affectedPaths: [source.path, 'scripts.yml'], warnings: [] }); return;
     }
     if (url.pathname.endsWith('/projects/create-and-assign')) {

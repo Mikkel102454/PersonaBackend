@@ -6,6 +6,7 @@ export class CommandDispatcher {
     if (!id || this.commands.has(id) || typeof definition?.run !== 'function')
       throw new Error(`Invalid or duplicate command: ${id}`);
     this.commands.set(id, { id, label: definition.label || id, enabled: definition.enabled || (() => true),
+      disabledReason: definition.disabledReason || (() => 'Unavailable in the current selection, capability, or connection state.'),
       keywords: definition.keywords || '', run: definition.run });
     return this;
   }
@@ -18,8 +19,10 @@ export class CommandDispatcher {
 
   entries(query = '') {
     const needle = query.trim().toLowerCase();
-    return [...this.commands.values()].filter(command => command.enabled()
-      && (!needle || `${command.label} ${command.keywords}`.toLowerCase().includes(needle)));
+    return [...this.commands.values()].filter(command =>
+      !needle || `${command.label} ${command.keywords}`.toLowerCase().includes(needle))
+      .map(command => ({ ...command, available: Boolean(command.enabled()),
+        reason: command.enabled() ? '' : command.disabledReason() }));
   }
 
   bindButton(element, id, payload = () => undefined) {

@@ -4,10 +4,16 @@
  * replacement graph or YAML document in the browser.
  */
 export class GraphMutationClient {
-  constructor(options) { this.options = options; this.inFlight = false; }
+  constructor(options) { this.options = options; this.inFlight = false; this.tail = Promise.resolve(); }
 
-  async mutate(operations, label = 'Graph edit') {
-    if (this.inFlight || !Array.isArray(operations) || !operations.length) return null;
+  mutate(operations, label = 'Graph edit') {
+    if (!Array.isArray(operations) || !operations.length) return Promise.resolve(null);
+    const queued = this.tail.then(() => this.perform(operations, label));
+    this.tail = queued.catch(() => null);
+    return queued;
+  }
+
+  async perform(operations, label) {
     let context;
     try { context = await this.options.context(); }
     catch (error) { this.options.onError?.(label, error); return null; }
@@ -22,12 +28,15 @@ export class GraphMutationClient {
         headers: this.options.headers({ 'Content-Type': 'application/json' }),
         body: JSON.stringify({
           graphVersion: context.projection.graphVersion,
-          path: context.resource.path,
+          requestId: crypto.randomUUID(),
+          resourceIdentity: context.projection.resourceIdentity,
+          filePath: context.resource.path,
           resourceKind: context.resource.kind,
           resourceId: context.resource.id,
-          yamlPath: context.resource.yamlPath || '',
+          rootYamlPath: context.resource.yamlPath || '',
           content: context.content,
-          expectedDigest: context.projection.contentDigest,
+          expectedContentDigest: context.projection.contentDigest,
+          expectedProjectRevision: context.projectRevision || null,
           projectFiles: context.projectFiles,
           operations
         })
@@ -35,7 +44,7 @@ export class GraphMutationClient {
       const result = await readJson(response);
       if (!response.ok) {
         this.options.rollbackHistory?.(context);
-        if (response.status === 409 || result.code === 'STALE_CONTENT') this.options.onConflict?.(result);
+        if (response.status === 409 || ['STALE_CONTENT', 'STALE_PROJECTION', 'STALE_PROJECT_REVISION', 'STALE_SOURCE_RANGE'].includes(result.code)) this.options.onConflict?.(result);
         else this.options.onContractError?.(label, result);
         return null;
       }

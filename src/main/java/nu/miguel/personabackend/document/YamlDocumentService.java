@@ -192,6 +192,28 @@ public final class YamlDocumentService {
         return result;
     }
 
+    /** Moves one mapping entry beside a sibling without serializing either value or their neighbors. */
+    public YamlDocumentResponse moveMappingField(String content, String sourcePath, String targetPath,
+                                                 boolean beforeTarget) {
+        YamlDocumentResponse parsed = parse(content);
+        if (!parsed.valid()) throw bad("Cannot reorder a field while YAML has syntax errors");
+        YamlDocumentNode source = find(parsed.root(), sourcePath), target = find(parsed.root(), targetPath);
+        YamlDocumentNode sourceParent = source == null ? null : find(parsed.root(), parentPath(sourcePath));
+        YamlDocumentNode targetParent = target == null ? null : find(parsed.root(), parentPath(targetPath));
+        if (source == null || target == null || source.path().equals(target.path())
+                || sourceParent == null || targetParent == null || !sourceParent.path().equals(targetParent.path())
+                || !"mapping".equals(sourceParent.kind())) throw bad("Mapping fields can only move beside a sibling");
+        Range sourceRange = range(content, parsed.root(), source), targetRange = range(content, parsed.root(), target);
+        String block = content.substring(sourceRange.start(), sourceRange.end());
+        String without = content.substring(0, sourceRange.start()) + content.substring(sourceRange.end());
+        int insertion = beforeTarget ? targetRange.start() : targetRange.end();
+        if (sourceRange.start() < insertion) insertion -= sourceRange.end() - sourceRange.start();
+        String updated = without.substring(0, insertion) + block + without.substring(insertion);
+        YamlDocumentResponse result = parse(updated);
+        if (!result.valid()) throw bad("The mapping reorder did not produce valid YAML");
+        return result;
+    }
+
     /** Wraps one list item in a server-defined behaviour container without touching sibling bytes. */
     public YamlDocumentResponse wrapSequenceItem(String content, String sourcePath, String wrapperId,
                                                  String wrapperType) {

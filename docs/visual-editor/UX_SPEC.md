@@ -144,13 +144,20 @@ assign without discarding current navigation state.
 ### Reusable scripts
 
 ```text
-[Entry: celebrate] ─► [Command: play-sound] ─success─► [Wait] ─► [Terminal]
-                              └─failure──────────────► [Command: message]
+[Input] ─exec─► [Command: play-sound] ─success─► [Wait] ─exec─► [Output]
+   └─ sound:data ────────────────┘       └─failure─► [Command: message]
 ```
 
 Every key below `scripts:` is a separately navigable graph but remains in
-`scripts.yml`. `if`, `choice`, `random`, and command success/failure scripts open
-nested subgraphs. Call nodes navigate to reusable scripts and callers.
+`scripts.yml`. Reusable graphs use stable keyed nodes and connections, synthetic non-deletable
+Input/Output boundaries, white triangular execution pins, and type-colored circular data pins.
+Unwired data inputs show type-appropriate inline controls; resource values can be dragged from the
+Content Browser to create value nodes. Call nodes mirror the selected script signature and open the
+callee on double-click.
+
+The Input and Output cards provide an accessible add-parameter control. Selecting a parameter in
+the Inspector exposes rename, type, reorder, and guarded delete actions. These signature mutations
+are project-wide and atomic, including caller bindings and explicit data wires.
 
 ### Unsupported and custom YAML
 
@@ -249,4 +256,3 @@ reachable without two-dimensional page scrolling; canvas panning is not page scr
 - Motion respects `prefers-reduced-motion`; high-contrast/forced-color mode retains
   boundaries and focus; status changes use polite live regions except connection loss,
   which is assertive.
-

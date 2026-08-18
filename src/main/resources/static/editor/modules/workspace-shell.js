@@ -1,3 +1,6 @@
+import { CONTENT_WINDOW, boundedResources, resourceMatches } from './content-browser.js';
+import { closeTabsToRight, reorderTabs } from './resource-tabs.js';
+
 const GROUPS = [
   ['npc', 'NPCs'], ['dialogue', 'Dialogues'], ['quest', 'Quests'],
   ['behavior', 'Behaviours'], ['script', 'Scripts'], ['other', 'Other YAML']
@@ -68,12 +71,17 @@ export class WorkspaceShell {
     this.forward = [];
     this.recent = [];
     this.nestedBreadcrumbs = [];
+    this.browserView = 'library';
+    this.browserLimits = Object.fromEntries(GROUPS.map(([kind]) => [kind, CONTENT_WINDOW]));
     this.preferences = this.loadPreferences();
+    this.preferenceKey = 'persona:workspace-preferences:v1';
     this.bind();
   }
 
   bind() {
-    for (const control of [this.search, this.filter, this.sort]) control.addEventListener('input', () => this.renderBrowser());
+    for (const control of [this.search, this.filter, this.sort]) control.addEventListener('input', () => {
+      this.browserLimits = Object.fromEntries(GROUPS.map(([kind]) => [kind, CONTENT_WINDOW])); this.renderBrowser();
+    });
     this.density.addEventListener('click', () => {
       this.preferences.compact = !this.preferences.compact;
       this.savePreferences(); this.renderBrowser();
@@ -128,6 +136,17 @@ export class WorkspaceShell {
 
   activeResource() { return this.resources.find(item => item.identity === this.active) ?? null; }
 
+  showView(view) {
+    if (!['library', 'bookmarks', 'recents'].includes(view)) return;
+    this.browserView = view;
+    if (view === 'recents') this.sort.value = 'recent';
+    for (const button of document.querySelectorAll('#navigation-rail button')) {
+      const active = button.id === `rail-${view}`; button.classList.toggle('active', active);
+      if (active) button.setAttribute('aria-current', 'page'); else button.removeAttribute('aria-current');
+    }
+    this.renderBrowser();
+  }
+
   setNestedBreadcrumbs(parts = []) {
     this.nestedBreadcrumbs = Array.isArray(parts) ? parts.slice(0, 8) : [];
     this.renderBreadcrumbs();
@@ -138,7 +157,9 @@ export class WorkspaceShell {
   renderBrowser() {
     const query = this.search.value.trim().toLowerCase();
     const filter = this.filter.value;
-    let visible = this.resources.filter(item => (!query || item.search.includes(query)) && this.matchesFilter(item, filter));
+    let visible = this.resources.filter(item => resourceMatches(item, query, this.options.searchTerms?.(item) || '')
+      && this.matchesFilter(item, filter));
+    if (this.browserView === 'bookmarks') visible = visible.filter(item => this.options.bookmarked?.(item));
     const recentIndex = identity => { const index = this.recent.indexOf(identity); return index < 0 ? Number.MAX_SAFE_INTEGER : index; };
     visible.sort((left, right) => {
       if (this.sort.value === 'path') return left.path.localeCompare(right.path) || left.id.localeCompare(right.id);
@@ -162,10 +183,20 @@ export class WorkspaceShell {
       section.append(heading);
       if (!this.preferences.collapsed[kind]) {
         const list = document.createElement('ul');
-        for (const item of items) list.append(this.browserItem(item));
+        const rendered = boundedResources(items, this.browserLimits[kind]);
+        for (const item of rendered) list.append(this.browserItem(item));
         if (!items.length) { const empty = document.createElement('li'); empty.className = 'content-empty'; empty.textContent = query || filter !== 'all' ? 'No matches' : 'No content'; list.append(empty); }
+        if (rendered.length < items.length) {
+          const more = document.createElement('li'), button = document.createElement('button');
+          button.type = 'button'; button.className = 'content-load-more';
+          button.textContent = `Show ${Math.min(CONTENT_WINDOW, items.length - rendered.length)} more ${label}`;
+          button.addEventListener('click', () => { this.browserLimits[kind] = rendered.length + CONTENT_WINDOW; this.renderBrowser();
+            this.root.querySelector(`.content-group[data-kind="${kind}"] .content-load-more`)?.focus(); });
+          more.append(button); list.append(more);
+        }
         section.append(list);
       }
+      section.dataset.kind = kind;
       fragment.append(section);
     }
     this.root.replaceChildren(fragment);
@@ -180,6 +211,9 @@ export class WorkspaceShell {
     button.querySelector('small').textContent = `${item.id === item.label ? '' : `${item.id} · `}${item.path}`;
     button.title = `${item.kind}: ${item.id}\n${item.path}`;
     if (item.identity === this.active) button.setAttribute('aria-current', 'page');
+    if (['npc','dialogue','quest','behavior','script'].includes(item.kind)) { button.draggable = true;
+      button.addEventListener('dragstart', event => { event.dataTransfer.effectAllowed = 'copy';
+        event.dataTransfer.setData('application/x-persona-resource', JSON.stringify({ kind: item.kind, id: item.id })); }); }
     button.addEventListener('click', () => this.openResource(item));
     row.append(button); return row;
   }
@@ -196,13 +230,47 @@ export class WorkspaceShell {
       if (identity === this.active) open.setAttribute('aria-current', 'page');
       open.addEventListener('click', () => this.openResource(resource));
       open.addEventListener('auxclick', event => { if (event.button === 1) this.closeResource(identity); });
+      open.addEventListener('contextmenu', event => { event.preventDefault(); this.openTabMenu(identity, index, event.clientX, event.clientY, open); });
       const close = document.createElement('button'); close.type = 'button'; close.className = 'tab-close'; close.textContent = '×'; close.setAttribute('aria-label', `Close ${resource.label}`);
       close.addEventListener('click', () => this.closeResource(identity));
       tab.addEventListener('dragstart', event => event.dataTransfer.setData('text/persona-tab', identity));
       tab.addEventListener('dragover', event => event.preventDefault());
-      tab.addEventListener('drop', event => { event.preventDefault(); const source = event.dataTransfer.getData('text/persona-tab'), from = this.openTabs.indexOf(source); if (from < 0) return; this.openTabs.splice(from, 1); this.openTabs.splice(index, 0, source); this.renderTabs(); });
+      tab.addEventListener('drop', event => { event.preventDefault();
+        this.openTabs = reorderTabs(this.openTabs, event.dataTransfer.getData('text/persona-tab'), index); this.renderTabs(); });
       tab.append(open, close); return tab;
     }));
+  }
+
+  openTabMenu(identity, index, x, y, restore) {
+    document.querySelector('#resource-tab-menu')?.remove();
+    const menu = document.createElement('div'); menu.id = 'resource-tab-menu'; menu.className = 'resource-tab-menu';
+    menu.setAttribute('role', 'menu'); menu.style.left = `${x}px`; menu.style.top = `${y}px`;
+    const action = (label, run, disabled = false) => {
+      const button = document.createElement('button'); button.type = 'button'; button.setAttribute('role', 'menuitem');
+      button.textContent = label; button.disabled = disabled;
+      button.addEventListener('click', () => { run(); menu.remove(); }); menu.append(button);
+    };
+    action('Close', () => this.closeResource(identity));
+    action('Close others', () => {
+      for (const other of this.openTabs.filter(value => value !== identity)) this.closedTabs.unshift(other);
+      this.openTabs = [identity]; this.openResource(identity, false); this.render();
+    }, this.openTabs.length < 2);
+    action('Close to the right', () => {
+      const result = closeTabsToRight(this.openTabs, index);
+      for (const other of result.closed) this.closedTabs.unshift(other);
+      this.openTabs = result.kept; this.render();
+    }, index >= this.openTabs.length - 1);
+    menu.addEventListener('keydown', event => {
+      const buttons = [...menu.querySelectorAll('button:not(:disabled)')], current = buttons.indexOf(document.activeElement);
+      if (event.key === 'Escape') { event.preventDefault(); menu.remove(); restore.focus(); }
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault(); buttons[(current + (event.key === 'ArrowDown' ? 1 : -1) + buttons.length) % buttons.length]?.focus();
+      }
+    });
+    document.body.append(menu); menu.querySelector('button:not(:disabled)')?.focus();
+    setTimeout(() => document.addEventListener('pointerdown', event => {
+      if (!menu.contains(event.target)) menu.remove();
+    }, { once: true }), 0);
   }
 
   renderBreadcrumbs() {
@@ -261,11 +329,17 @@ export class WorkspaceShell {
     else if (command && event.shiftKey && event.key.toLowerCase() === 't') { event.preventDefault(); this.reopenClosed(); }
   }
 
+  setPreferenceScope(scope) {
+    const key = `persona:workspace-preferences:v2:${scope}`;
+    if (key === this.preferenceKey) return;
+    this.preferenceKey = key; this.preferences = this.loadPreferences(); this.renderBrowser();
+  }
+
   loadPreferences() {
     try {
-      const saved = JSON.parse(localStorage.getItem('persona:workspace-preferences:v1') || '{}');
+      const saved = JSON.parse(localStorage.getItem(this.preferenceKey || 'persona:workspace-preferences:v1') || '{}');
       return { compact: Boolean(saved.compact), collapsed: saved.collapsed && typeof saved.collapsed === 'object' ? saved.collapsed : {} };
     } catch { return { compact: false, collapsed: {} }; }
   }
-  savePreferences() { localStorage.setItem('persona:workspace-preferences:v1', JSON.stringify(this.preferences)); }
+  savePreferences() { localStorage.setItem(this.preferenceKey, JSON.stringify(this.preferences)); }
 }

@@ -30,10 +30,16 @@ test('path classification never guesses unsupported YAML as a Persona resource',
 
 test('layout preferences are versioned and bounded', () => {
   assert.deepEqual(normalizeLayout({ version: 0, browserWidth: 9999 }), {
-    version: 1, browserWidth: 288, sourceRatio: .5, browserCollapsed: false
+    version: 2, browserWidth: 280, inspectorWidth: 320, dockHeight: 0,
+    browserCollapsed: false, inspectorCollapsed: false, dockCollapsed: true,
+    inspectorTab: 'inspector', dockTab: 'yaml', centerSplit: 'visual'
   });
-  assert.deepEqual(normalizeLayout({ version: 1, browserWidth: -20, sourceRatio: 2, browserCollapsed: 1 }), {
-    version: 1, browserWidth: 192, sourceRatio: .75, browserCollapsed: true
+  assert.deepEqual(normalizeLayout({ version: 2, browserWidth: -20, inspectorWidth: 9999,
+    dockHeight: 9999, browserCollapsed: 1, dockCollapsed: false, inspectorTab: 'forged',
+    dockTab: 'secrets', centerSplit: 'unknown' }, 800), {
+    version: 2, browserWidth: 220, inspectorWidth: 520, dockHeight: 440,
+    browserCollapsed: true, inspectorCollapsed: false, dockCollapsed: false,
+    inspectorTab: 'inspector', dockTab: 'yaml', centerSplit: 'visual'
   });
 });
 

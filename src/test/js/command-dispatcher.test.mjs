@@ -10,5 +10,8 @@ test('dispatches every entry point through one enabled command registry', () => 
   assert.equal(dispatcher.execute('graph.connect', { value: 2, allowed: false }), false);
   assert.deepEqual(calls, [1]);
   assert.equal(dispatcher.entries('pins')[0].id, 'graph.connect');
+  dispatcher.register('graph.delete', { label: 'Delete', enabled: () => false,
+    disabledReason: () => 'Select a node.', run() {} });
+  assert.deepEqual(dispatcher.entries('delete').map(value => [value.available, value.reason]), [[false, 'Select a node.']]);
   assert.throws(() => dispatcher.register('graph.connect', { run() {} }), /duplicate/);
 });
