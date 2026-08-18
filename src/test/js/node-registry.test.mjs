@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { nodeDefinitions, compatibleDefinitions } from '../../main/resources/static/editor/modules/node-registry.js';
+import { nodeDefinitions, compatibleDefinitions, matchingDefinitionInput, automaticNodeId, yamlMappingKeys } from '../../main/resources/static/editor/modules/node-registry.js';
 import { connectionCompatibility } from '../../main/resources/static/editor/modules/connection-rules.js';
 
 test('signed schema descriptors become data-only compatible palette entries', () => {
@@ -24,8 +24,50 @@ test('signed schema descriptors become data-only compatible palette entries', ()
   assert.ok(compatibleDefinitions(nodeDefinitions('script', schemas), { semanticType: 'data:vendor:receipt' })
     .some(item => item.nodeKind === 'to-string' && item.valueType === 'vendor:receipt'));
   assert.equal(JSON.stringify(behavior).includes('function'), false);
-  assert.ok(nodeDefinitions('npc', schemas).some(item => item.label === 'NPC interaction · Say line'));
+  assert.ok(nodeDefinitions('npc', schemas).some(item => item.label === 'Say line' && item.destination === 'graph'));
+  assert.ok(nodeDefinitions('dialogue', schemas).some(item => item.nodeKind === 'for-each'));
+  assert.ok(nodeDefinitions('quest', schemas).some(item => item.nodeKind === 'gate'));
   assert.equal(nodeDefinitions('npc', schemas).some(item => item.label.startsWith('Lifecycle ·')), false);
+});
+
+test('context-sensitive node search can be disabled without losing graph-kind entries', () => {
+  const definitions = [
+    { label: 'Wait', inputType: 'execution' },
+    { label: 'Integer converter', inputType: 'data:integer' },
+    { label: 'Unavailable', inputType: 'execution' }
+  ];
+  const source = { semanticType: 'execution' };
+  const insertable = definition => definition.label !== 'Unavailable';
+  assert.deepEqual(compatibleDefinitions(definitions, source, insertable, true).map(value => value.label), ['Wait']);
+  assert.deepEqual(compatibleDefinitions(definitions, source, insertable, false), definitions);
+});
+
+test('context-sensitive node search matches execution and typed data outputs to real input pins', () => {
+  const definitions = nodeDefinitions('script');
+  const booleanConsumers = compatibleDefinitions(definitions,
+    { channel: 'DATA', valueType: 'boolean', semanticType: 'stale-contract-value' });
+  const branch = booleanConsumers.find(definition => definition.nodeKind === 'branch');
+  assert.ok(branch);
+  assert.deepEqual(matchingDefinitionInput(branch, { channel: 'DATA', valueType: 'boolean' }),
+    { semanticType: 'data:boolean', label: 'condition' });
+  const numberConsumers = compatibleDefinitions(definitions, { channel: 'DATA', valueType: 'number' });
+  assert.ok(numberConsumers.some(definition => definition.nodeKind === 'play-sound'));
+  assert.ok(compatibleDefinitions(definitions, { channel: 'EXECUTION', semanticType: 'legacy-exec' })
+    .some(definition => definition.nodeKind === 'wait'));
+  assert.ok(compatibleDefinitions(nodeDefinitions('quest'), { channel: 'EXECUTION', semanticType: 'phase-flow' })
+    .some(definition => definition.nodeKind === 'quest-phase'));
+});
+
+test('generates readable collision-free node IDs without user input', () => {
+  assert.equal(automaticNodeId({ label: 'Give item' }, []), 'give-item');
+  assert.equal(automaticNodeId({ label: 'Give item' }, [{ title: 'give-item' }, { title: 'give-item-2' }]), 'give-item-3');
+  assert.equal(automaticNodeId({ label: 'Extension · Toast', extensionType: 'vendor:toast' }, []), 'toast');
+});
+
+test('finds raw YAML mapping keys when the visual projection is stale', () => {
+  const keys = yamlMappingKeys("on-click:\n  nodes:\n    give-item: { type: give-item }\n    'quoted-node': {}\n");
+  assert.deepEqual(keys, ['on-click', 'nodes', 'give-item', 'quoted-node']);
+  assert.equal(automaticNodeId({ label: 'Give item' }, keys.map(title => ({ title }))), 'give-item-2');
 });
 
 test('pin compatibility explains direction, semantics, cardinality replacement, and cycles', () => {

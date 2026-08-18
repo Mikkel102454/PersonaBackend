@@ -21,6 +21,9 @@ public final class GraphProjectionService {
     static final int MAX_NODES = 10_000;
     static final int MAX_EDGES = 20_000;
     private static final Set<String> KINDS = Set.of("behavior", "dialogue", "quest", "npc", "script", "other");
+    private static final Set<String> PLAYER_TARGET_COMMANDS = Set.of("start-quest", "finish-quest", "deliver-items",
+            "set-flag", "set-variable", "message", "action-bar", "title", "play-sound", "particle", "give-item",
+            "take-item", "give-experience", "run-command", "teleport", "potion-effect", "npc-speak");
     private final YamlDocumentService documents;
     private final ProjectReferenceService references;
     private final ProjectContentRules projectRules;
@@ -80,7 +83,7 @@ public final class GraphProjectionService {
             String id = relationshipId(declaration.type(), declaration.id());
             SourceRange range = new SourceRange(0, 0, declaration.line(), declaration.column(),
                     declaration.line(), declaration.column());
-            String yamlPath = declaration.type().equals("script") ? "/scripts/" + declaration.id() : "/id";
+            String yamlPath = "/id";
             List<GraphPin> pins=new ArrayList<>();
             pins.add(new GraphPin(id + ":in", id, "input", "reference:"+declaration.type(), "many", false, "inbound", yamlPath));
             for(String targetType:referenceTypes.getOrDefault(declaration.type()+"\0"+declaration.id(),Set.of()))
@@ -131,7 +134,7 @@ public final class GraphProjectionService {
                 List.of("SELECT", "PAN_ZOOM", "AUTO_LAYOUT", "INSPECT", "OPEN_SOURCE", "OPEN_TARGET"));
     }
 
-    private static final class Builder {
+    private final class Builder {
         private static final ObjectMapper JSON = new ObjectMapper();
         private static final Set<String> BEHAVIOR_ROOT = Set.of("content-version", "id", "scope", "root");
         private static final Set<String> DIALOGUE_ROOT = Set.of("content-version", "id", "start", "nodes");
@@ -139,8 +142,8 @@ public final class GraphProjectionService {
                 "when", "requirements", "repeatable", "cooldown", "maximum-completions", "time-limit",
                 "on-start", "on-complete", "on-fail", "on-reset");
         private static final Set<String> NPC_ROOT = Set.of("content-version", "id", "display-name", "shared-behavior",
-                "player-behavior", "dialogues", "anchors", "presentation", "skin", "equipment", "age", "pose",
-                "on-interact", "on-no-dialogue");
+                "player-behavior", "dialogues", "anchors", "tags", "on-click", "on-damage", "on-spawn",
+                "on-despawn", "on-no-dialogue", "signals");
         private final GraphProjectionRequest request;
         private final YamlDocumentNode documentRoot;
         private final ProjectReferenceGraph referenceGraph;
@@ -254,12 +257,15 @@ public final class GraphProjectionService {
             }
             Map<String, List<String>> transfers = new HashMap<>();
             for (YamlDocumentNode entry : entries.children()) {
-                YamlDocumentNode script = child(entry, "script");
-                if (script != null) projectSteps(script, identity(entry, entry.key()), "dialogue", transfers, entry.key(), null);
-                if (script == null || !containsStepType(script, Set.of("goto", "end-dialogue")))
-                    diagnostic("IMPLICIT_DIALOGUE_END", "WARNING",
-                            "Dialogue node has no explicit transfer or end-dialogue command",
-                            entry, identity(entry, entry.key()), null, null);
+                YamlDocumentNode graph = child(entry, "graph");
+                eventGraph(graph, "Dialogue · " + entry.key(), orderedTypes(
+                        "player", "player", "npc", "npc", "npc-instance", "npc-instance",
+                        "dialogue", "dialogue", "dialogue-node", "string"), entry.path() + "/graph");
+                YamlDocumentNode definitions = child(graph, "nodes");
+                if (definitions != null) for (YamlDocumentNode definition : definitions.children())
+                    if ("goto".equals(value(definition, "type", "")) && child(definition, "dialogue") == null)
+                        transfers.computeIfAbsent(entry.key(), ignored -> new ArrayList<>())
+                                .add(value(definition, "node", ""));
             }
             for (var transfer : transfers.entrySet()) {
                 for (String target : transfer.getValue()) {
@@ -271,7 +277,7 @@ public final class GraphProjectionService {
                     boolean cyclic = pathExists(transfers, target, transfer.getKey(), new HashSet<>());
                     String transferSource = transferStep == null
                             ? identity(entries.children().stream().filter(item -> item.key().equals(transfer.getKey())).findFirst().orElseThrow(), transfer.getKey())
-                            : identity(transferStep, semanticId(transferStep));
+                            : nodeByPath.getOrDefault(transferStep.path(), identity(transferStep, semanticId(transferStep)));
                     connect(transferSource,
                             targetId, "dialogue-flow", "transfer",
                             transferStep == null ? "/nodes/" + escape(transfer.getKey()) : transferStep.path(),
@@ -305,7 +311,7 @@ public final class GraphProjectionService {
                 questCondition(questCenter, requirement, "requirement");
             for (String hook : List.of("on-start", "on-complete", "on-fail", "on-reset")) {
                 YamlDocumentNode steps = child(root, hook);
-                if (steps != null) projectSteps(steps, questCenter, "quest", new HashMap<>(), hook, hook);
+                eventGraph(steps, "Quest · " + hook, orderedTypes("player", "player", "quest", "quest"), root.path() + "/" + hook);
             }
             Map<String, YamlDocumentNode> byId = new LinkedHashMap<>();
             Set<String> duplicateIds = new HashSet<>();
@@ -336,12 +342,24 @@ public final class GraphProjectionService {
                             type.contains(":") ? List.of("extension") : List.of(), false,
                             type.contains(":") ? type.substring(0, type.indexOf(':')) : null);
                     connect(id, objectiveId, "quest-objective", "objective", phase.path(), objective.path(), true, false, edges.size());
+                    Map<String, String> objectivePins = orderedTypes("player", "player", "quest", "quest",
+                            "objective", "quest-objective", "progress", "integer", "required", "integer");
+                    for (String hook : List.of("on-start", "on-complete")) {
+                        YamlDocumentNode graph = child(objective, hook);
+                        eventGraph(graph, "Objective " + value(objective, "id", type) + " · " + hook,
+                                objectivePins, objective.path() + "/" + hook);
+                    }
+                    YamlDocumentNode progress = child(objective, "on-progress");
+                    if (progress != null && child(progress, "graph") != null)
+                        eventGraph(child(progress, "graph"), "Objective " + value(objective, "id", type) + " · on-progress", objectivePins);
                 }
                 YamlDocumentNode phaseWhen = child(phase, "when");
                 if (phaseWhen != null) questCondition(id, phaseWhen, "phase requirement");
                 for (String hook : List.of("on-start", "on-complete", "on-fail", "on-reset")) {
                     YamlDocumentNode steps = child(phase, hook);
-                    if (steps != null) projectSteps(steps, id, "quest", new HashMap<>(), hook, hook);
+                    eventGraph(steps, "Phase " + phaseId + " · " + hook,
+                            orderedTypes("player", "player", "quest", "quest", "phase", "string"),
+                            phase.path() + "/" + hook);
                 }
             }
             String terminal = syntheticNode("quest-completion", "Quest complete", "Terminal");
@@ -429,32 +447,80 @@ public final class GraphProjectionService {
         }
 
         private void npc(YamlDocumentNode root) {
-            String center = identity(root, request.resourceId());
-            addWithId(center, root, "npc", request.resourceId(), value(root, "display-name", "NPC"),
-                    List.of(),
-                    List.of(), false, null);
-            YamlDocumentNode presentation = child(root, "presentation");
-            if (presentation != null) appendFields(center, fields(presentation, false));
+            String center = request.resourceKind() + ":" + request.resourceId() + "#npc-configuration";
+            List<GraphPin> configurationPins = new ArrayList<>();
+            YamlDocumentNode displayName = child(root, "display-name");
+            configurationPins.add(typedPin(center, "input", "DATA", "text", false, "Display Name",
+                    displayName == null ? root.path() + "/display-name" : displayName.path(), 0,
+                    displayName == null ? null : displayName.value(), request.resourceId()));
+            configurationPins.add(typedPin(center, "input", "DATA", "behavior", false, "Shared Behaviour",
+                    root.path() + "/shared-behavior", 1, null, null));
+            configurationPins.add(typedPin(center, "input", "DATA", "behavior", false, "Player Behaviour",
+                    root.path() + "/player-behavior", 2, null, null));
+            configurationPins.add(new GraphPin(center + ":input:dialogues", center, "input", "data:dialogue-registration",
+                    "ZERO_OR_MANY", false, "Dialogue Registrations", root.path() + "/dialogues", 3, range(root), null,
+                    "DATA", "dialogue-registration", null, null));
+            configurationPins.add(new GraphPin(center + ":input:anchors", center, "input", "data:anchor",
+                    "ZERO_OR_MANY", false, "Anchors", root.path() + "/anchors", 4, range(root), null,
+                    "DATA", "anchor", null, "anchor"));
+            configurationPins.add(typedPin(center, "output", "DATA", "npc", false, "NPC Definition", root.path(), 0, null, null));
+            addWithId(center, root, "npc-configuration", "NPC Configuration", value(root, "display-name", request.resourceId()),
+                    configurationPins, List.of("permanent", "non-deletable"), false, null);
             for (String key : List.of("shared-behavior", "player-behavior")) {
                 YamlDocumentNode reference = child(root, key);
-                if (reference != null) npcReference(center, reference, "behavior", reference.value(), key);
+                if (reference != null) npcReference(center, reference, "behavior", reference.value(),
+                        key.equals("shared-behavior") ? "Shared Behaviour" : "Player Behaviour");
             }
             YamlDocumentNode dialogues = child(root, "dialogues");
             if (dialogues != null) for (YamlDocumentNode registration : dialogues.children()) {
                 YamlDocumentNode reference = child(registration, "id");
-                if (reference != null) npcReference(center, reference, "dialogue", reference.value(), "dialogue");
+                if (reference == null) continue;
+                String id = request.resourceKind() + ":" + request.resourceId() + "#dialogue-registration:" + pinToken(registration.path());
+                List<GraphPin> pins = List.of(
+                        typedPin(id, "input", "DATA", "dialogue", true, "Dialogue", reference.path(), 0, reference.value(), null),
+                        typedPin(id, "input", "DATA", "integer", false, "Priority", registration.path() + "/priority", 1,
+                                value(registration, "priority", "0"), "0"),
+                        typedPin(id, "input", "DATA", "condition", false, "Condition", registration.path() + "/when", 2, null, null),
+                        typedPin(id, "output", "DATA", "dialogue-registration", false, "Registration", registration.path(), 0, null, null));
+                addWithId(id, registration, "dialogue-registration", reference.value(), "Dialogue Registration", pins, List.of(), false, null);
+                graphEdge("npc-registration:" + pinToken(registration.path()), pins.get(3), configurationPins.get(3),
+                        registration.path(), dialogues.path(), "registration");
             }
             YamlDocumentNode anchors = child(root, "anchors");
             if (anchors != null) for (YamlDocumentNode anchor : anchors.children()) {
                 String id = identity(anchor, anchor.key());
-                addWithId(id, anchor, "npc-anchor", anchor.key(), "World anchor",
-                        List.of(pin(id, "input", "anchor", "single", true, "NPC", anchor.path())),
+                List<GraphPin> pins = new ArrayList<>();
+                for (String field : List.of("world", "x", "y", "z", "yaw", "pitch")) {
+                    YamlDocumentNode scalar = child(anchor, field);
+                    String type = field.equals("world") ? "world" : "number";
+                    pins.add(typedPin(id, "input", "DATA", type, Set.of("world", "x", "y", "z").contains(field),
+                            field, scalar == null ? anchor.path() + "/" + field : scalar.path(), pins.size(),
+                            scalar == null ? null : scalar.value(), Set.of("yaw", "pitch").contains(field) ? "0" : null));
+                }
+                GraphPin output = typedPin(id, "output", "DATA", "anchor", false, "Anchor", anchor.path(), 0, null, null);
+                pins.add(output);
+                addWithId(id, anchor, "npc-anchor", anchor.key(), "Anchor Definition", pins,
                         List.of(), false, null);
-                connect(center, id, "anchor", "anchor", root.path(), anchor.path(), true, false, edges.size());
+                graphEdge("npc-anchor:" + pinToken(anchor.path()), output, configurationPins.get(4), anchor.path(), anchors.path(), "anchor");
             }
-            for (String hook : List.of("on-interact", "on-no-dialogue")) {
-                YamlDocumentNode steps = child(root, hook);
-                if (steps != null) projectSteps(steps, center, "script", new HashMap<>(), hook, hook);
+            Map<String, Map<String, String>> events = new LinkedHashMap<>();
+            events.put("on-click", orderedTypes("player", "player", "npc", "npc", "npc-instance", "npc-instance",
+                    "left-button", "boolean", "right-button", "boolean"));
+            events.put("on-damage", orderedTypes("player", "player", "npc", "npc", "npc-instance", "npc-instance", "damage", "number"));
+            events.put("on-spawn", orderedTypes("npc", "npc", "npc-instance", "npc-instance"));
+            events.put("on-despawn", orderedTypes("npc", "npc", "npc-instance", "npc-instance", "reason", "string"));
+            events.put("on-no-dialogue", orderedTypes("player", "player", "npc", "npc", "npc-instance", "npc-instance"));
+            for (var event : events.entrySet()) {
+                YamlDocumentNode descriptor = child(root, event.getKey());
+                eventGraph(descriptor, title(event.getKey()), event.getValue(), root.path() + "/" + event.getKey());
+            }
+            YamlDocumentNode signals = child(root, "signals");
+            if (signals != null) for (YamlDocumentNode signal : signals.children()) {
+                Map<String, String> pins = orderedTypes("npc", "npc", "npc-instance", "npc-instance");
+                YamlDocumentNode parameters = child(signal, "parameters");
+                if (parameters != null) for (YamlDocumentNode parameter : parameters.children())
+                    pins.put(parameter.key(), value(parameter, "type", "string"));
+                eventGraph(child(signal, "graph"), "Signal · " + signal.key(), pins, signal.path() + "/graph");
             }
         }
 
@@ -462,17 +528,304 @@ public final class GraphProjectionService {
             boolean resolved = referenceGraph.declarations().stream()
                     .anyMatch(item -> item.type().equals(targetKind) && item.id().equals(targetId));
             String id = identity(reference, label + ":" + targetId);
+            GraphPin output = typedPin(id, "output", "DATA", targetKind, false, targetKind, reference.path(), 0, targetId, null);
             addWithId(id, reference, "resource-reference", targetId, targetKind,
-                    List.of(pin(id, "input", "reference:" + targetKind, "single", true, label, reference.path()),
-                            pin(id, "output", "reference:" + targetKind, "single", false, "open", reference.path())),
+                    List.of(output),
                     resolved ? List.of() : List.of("unresolved"), false, null);
-            connect(center, id, "reference:" + targetKind, label, request.yamlPath(), reference.path(), resolved, false, edges.size());
+            GraphPin target = nodes.stream().filter(node -> node.id().equals(center)).flatMap(node -> node.pins().stream())
+                    .filter(pin -> pin.label().equals(label)).findFirst().orElseThrow();
+            graphEdge("npc-reference:" + pinToken(reference.path()), output, target, reference.path(), target.yamlPath(), label);
         }
 
         private void script(YamlDocumentNode root) {
+            graphDescriptor(root, true, "Reusable Script", Map.of(), root.path());
+        }
+
+        private void eventGraph(YamlDocumentNode descriptor, String title, Map<String, String> eventPins) {
+            eventGraph(descriptor, title, eventPins, descriptor == null ? "" : descriptor.path());
+        }
+
+        private void eventGraph(YamlDocumentNode descriptor, String title, Map<String, String> eventPins,
+                                String absentPath) {
+            graphDescriptor(descriptor, false, title, eventPins, absentPath);
+        }
+
+        private void graphDescriptor(YamlDocumentNode descriptor, boolean reusable, String graphTitle,
+                                     Map<String, String> eventPins, String absentPath) {
+            String graphPath = descriptor == null ? absentPath : descriptor.path();
+            String prefix = request.resourceKind() + ":" + request.resourceId() + "#graph:"
+                    + sha256(graphPath).substring(0, 10);
+            Map<String, GraphPin> endpointPins = new LinkedHashMap<>();
+            if (reusable) {
+                if (descriptor == null || !"mapping".equals(descriptor.kind()) || child(descriptor, "inputs") == null
+                        || child(descriptor, "outputs") == null || child(descriptor, "variables") == null
+                        || child(descriptor, "nodes") == null || child(descriptor, "connections") == null)
+                    throw error(HttpStatus.UNPROCESSABLE_ENTITY, "SCRIPT_FORMAT_MIGRATION_REQUIRED",
+                            "Reusable scripts require one content-version 2 descriptor per scripts/**/*.yml file",
+                            request.path(), graphPath);
+                String inputId = prefix + ":input", outputId = prefix + ":output";
+                List<GraphPin> inputs = new ArrayList<>(), outputs = new ArrayList<>();
+                GraphPin enter = typedPin(inputId, "output", "EXECUTION", "execution", false,
+                        "exec", descriptor.path(), 0, null, null);
+                GraphPin leave = typedPin(outputId, "input", "EXECUTION", "execution", true,
+                        "exec", descriptor.path(), 0, null, null);
+                inputs.add(enter); outputs.add(leave); endpointPins.put("$input.exec", enter); endpointPins.put("$output.exec", leave);
+                int order = 1;
+                for (YamlDocumentNode parameter : child(descriptor, "inputs").children()) {
+                    String type = scriptValueType(value(parameter, "type", "string"), parameter);
+                    GraphPin pin = typedPin(inputId, "output", "DATA", type,
+                            Boolean.parseBoolean(value(parameter, "required", "false")), parameter.key(), parameter.path(),
+                            order++, childValue(parameter, "default"), childValue(parameter, "default"));
+                    inputs.add(pin); endpointPins.put("$input." + parameter.key(), pin);
+                }
+                order = 1;
+                for (YamlDocumentNode parameter : child(descriptor, "outputs").children()) {
+                    String type = scriptValueType(value(parameter, "type", "string"), parameter);
+                    GraphPin pin = typedPin(outputId, "input", "DATA", type,
+                            Boolean.parseBoolean(value(parameter, "required", "false")), parameter.key(), parameter.path(),
+                            order++, childValue(parameter, "default"), childValue(parameter, "default"));
+                    outputs.add(pin); endpointPins.put("$output." + parameter.key(), pin);
+                }
+                directNode(inputId, child(descriptor, "inputs"), "script-input", "Input", graphTitle,
+                        inputs, List.of("boundary", "permanent", "non-deletable"));
+                directNode(outputId, child(descriptor, "outputs"), "script-output", "Output", graphTitle,
+                        outputs, List.of("boundary", "permanent", "non-deletable"));
+            } else {
+                String eventId = prefix + ":event";
+                List<GraphPin> pins = new ArrayList<>();
+                GraphPin exec = typedPin(eventId, "output", "EXECUTION", "execution", false,
+                        "exec", graphPath, 0, null, null);
+                pins.add(exec); endpointPins.put("$event.exec", exec);
+                int order = 1;
+                for (var entry : eventPins.entrySet()) {
+                    GraphPin pin = typedPin(eventId, "output", "DATA", scriptValueType(entry.getValue(),
+                            descriptor == null ? documentRoot : descriptor), false, entry.getKey(), graphPath, order++, null, null);
+                    pins.add(pin); endpointPins.put("$event." + entry.getKey(), pin);
+                }
+                directNode(eventId, descriptor == null ? documentRoot : descriptor, "event", graphTitle,
+                        descriptor == null ? "Connect execution to create this graph" : "Host event", pins,
+                        descriptor == null ? List.of("permanent", "empty", "non-deletable")
+                                : List.of("permanent", "non-deletable"), graphPath);
+                if (descriptor == null) return;
+                if (!"mapping".equals(descriptor.kind()) || child(descriptor, "variables") == null
+                        || child(descriptor, "nodes") == null || child(descriptor, "connections") == null)
+                    throw error(HttpStatus.UNPROCESSABLE_ENTITY, "EVENT_GRAPH_FORMAT_REQUIRED",
+                            "Event graphs require variables, keyed nodes, and keyed connections", request.path(), graphPath);
+            }
+
+            YamlDocumentNode variables = child(descriptor, "variables");
+            Map<String, String> variableTypes = new LinkedHashMap<>();
+            if (variables != null) {
+                for (YamlDocumentNode variable : variables.children())
+                    variableTypes.put(variable.key(), scriptValueType(value(variable, "type", "string"), variable));
+                if (!variables.children().isEmpty()) {
+                    String variablesId = prefix + ":variables";
+                    directNode(variablesId, variables, "graph-variables", "Variables", "Execution-local typed storage",
+                            List.of(), List.of("permanent", "non-deletable"));
+                    appendFields(variablesId, variables.children().stream().map(variable -> {
+                        String type = value(variable, "type", "string");
+                        String defaultValue = childValue(variable, "default");
+                        return new GraphField(variablesId + ":field:" + pinToken(variable.key()), variable.key(),
+                                variable.path(), range(variable), "variable", defaultValue == null ? type : type + " = " + defaultValue,
+                                true, false, false);
+                    }).toList());
+                }
+            }
+
+            YamlDocumentNode definitions = child(descriptor, "nodes");
+            for (YamlDocumentNode definition : definitions.children()) {
+                String nodeKey = definition.key(), type = value(definition, "type", "unknown");
+                String nodeId = prefix + ":node:" + pinToken(nodeKey);
+                List<GraphPin> pins = graphNodePins(definition, nodeId, nodeKey, type, variableTypes, endpointPins);
+                String kind = pureGraphNode(type) ? "script-value" : type.equals("run-script") ? "script-call"
+                        : flowGraphNode(type) ? "flow-" + type : type.contains(":") ? "extension-command" : "script-" + type;
+                directNode(nodeId, definition, kind, nodeKey, type, pins,
+                        type.contains(":") ? List.of("extension") : pureGraphNode(type) ? List.of("pure") : List.of());
+                for(GraphPin pin:pins)if("INPUT".equals(pin.direction())&&"DATA".equals(pin.channel())
+                        &&pin.resourceKind()!=null&&pin.literal()!=null&&pin.literal().value()!=null)resourceValueBinding(pin);
+            }
+
+            Set<String> targets = new HashSet<>();
+            for (YamlDocumentNode connection : child(descriptor, "connections").children()) {
+                String from = value(connection, "from", ""), to = value(connection, "to", "");
+                GraphPin source = endpointPins.get(from), target = endpointPins.get(to);
+                if (source == null || target == null)
+                    throw error(HttpStatus.UNPROCESSABLE_ENTITY, "MISSING_PIN_ENDPOINT",
+                            "Connection " + connection.key() + " references a missing pin", request.path(), connection.path());
+                if (!targets.add(target.id())) throw error(HttpStatus.UNPROCESSABLE_ENTITY, "CARDINALITY_EXCEEDED",
+                        "Graph inputs accept only one connection", request.path(), connection.path());
+                if (!source.channel().equals(target.channel()) || source.channel().equals("DATA")
+                        && !source.valueType().equals(target.valueType()))
+                    throw error(HttpStatus.UNPROCESSABLE_ENTITY, "INCOMPATIBLE_PIN_TYPES",
+                            "Connection " + connection.key() + " has incompatible channel or nominal types",
+                            request.path(), connection.path());
+                graphEdge("graph-edge:" + pinToken(graphPath) + ":" + pinToken(connection.key()), source, target,
+                        connection.path() + "/from", connection.path() + "/to", connection.key());
+            }
+        }
+
+        private List<GraphPin> graphNodePins(YamlDocumentNode definition, String nodeId, String nodeKey, String type,
+                                             Map<String, String> variableTypes, Map<String, GraphPin> endpoints) {
+            List<GraphPin> pins = new ArrayList<>();
+            java.util.function.Consumer<GraphPin> add = pin -> { pins.add(pin); endpoints.put(nodeKey + "." + pin.label(), pin); };
+            if (type.equals("value")) {
+                add.accept(typedPin(nodeId, "output", "DATA", scriptValueType(value(definition, "value-type", "string"), definition),
+                        false, "value", definition.path() + "/value", 0, childValue(definition, "value"), null));
+                return pins;
+            }
+            if (type.equals("get-variable")) {
+                String variable = value(definition, "variable", "");
+                add.accept(typedPin(nodeId, "output", "DATA", variableTypes.getOrDefault(variable, "string"), false,
+                        "value", definition.path(), 0, null, null)); return pins;
+            }
+            if (type.startsWith("get-player-")) {
+                String outputType = type.endsWith("flag") ? "boolean" : "string";
+                add.accept(typedPin(nodeId, "output", "DATA", outputType, false, "value", definition.path(), 0, null, null));
+                return pins;
+            }
+            if (type.startsWith("get-global-npc-memory") || type.startsWith("get-player-npc-memory")) {
+                add.accept(typedPin(nodeId, "output", "DATA", scriptValueType(value(definition, "value-type", "string"), definition),
+                        false, "value", definition.path(), 0, null, null)); return pins;
+            }
+            if (Set.of("integer-to-number", "string-to-text", "to-string").contains(type)) {
+                String source = type.equals("integer-to-number") ? "integer" : type.equals("string-to-text") ? "string"
+                        : scriptValueType(value(definition, "value-type", "string"), definition);
+                String target = type.equals("integer-to-number") ? "number" : type.equals("string-to-text") ? "text" : "string";
+                add.accept(typedPin(nodeId, "input", "DATA", source, true, "value", definition.path() + "/value", 0,
+                        childValue(definition, "value"), null));
+                add.accept(typedPin(nodeId, "output", "DATA", target, false, "result", definition.path(), 0, null, null));
+                return pins;
+            }
+
+            if (type.equals("gate")) for (String name : List.of("enter", "open", "close", "toggle"))
+                add.accept(typedPin(nodeId, "input", "EXECUTION", "execution", false, name, definition.path(), pins.size(), null, null));
+            else {
+                add.accept(typedPin(nodeId, "input", "EXECUTION", "execution", true, "exec", definition.path(), 0, null, null));
+                if (Set.of("do-once", "do-n").contains(type)) add.accept(typedPin(nodeId, "input", "EXECUTION", "execution", false,
+                        "reset", definition.path(), 1, null, null));
+            }
+            List<String> executionOutputs = switch (type) {
+                case "branch", "if" -> List.of("true", "false");
+                case "sequence" -> { int count = integerValue(definition, "count", 2); List<String> values = new ArrayList<>();
+                    for (int index = 0; index < count; index++) values.add("then-" + index); values.add("completed"); yield values; }
+                case "switch" -> { List<String> values = new ArrayList<>(); YamlDocumentNode cases = child(definition, "cases");
+                    if (cases != null) for (YamlDocumentNode item : cases.children()) values.add("case-" + pinName(item.value()));
+                    values.add("default"); yield values; }
+                case "random" -> { List<String> values = new ArrayList<>(); YamlDocumentNode weights = child(definition, "weights");
+                    for (int index = 0; weights != null && index < weights.children().size(); index++) values.add("option-" + index); yield values; }
+                case "choice" -> { List<String> values = new ArrayList<>(); YamlDocumentNode options = child(definition, "options");
+                    for (int index = 0; options != null && index < options.children().size(); index++) values.add("option-" + index); yield values; }
+                case "gate" -> List.of("exit", "closed");
+                case "do-once" -> List.of("completed", "skipped");
+                case "do-n" -> List.of("completed", "exhausted");
+                case "for", "for-each", "while" -> List.of("body", "completed");
+                case "stop", "goto", "end-dialogue" -> List.of();
+                default -> List.of("success", "failure");
+            };
+            for (String name : executionOutputs) add.accept(typedPin(nodeId, "output", "EXECUTION", "execution", false,
+                    name, definition.path(), pins.size(), null, null));
+
+            Map<String, String> requiredData = new LinkedHashMap<>();
+            if (Set.of("branch", "if", "while").contains(type)) requiredData.put("condition", "boolean");
+            if (type.equals("switch")) requiredData.put("value", scriptValueType(value(definition, "value-type", "string"), definition));
+            if (type.equals("do-n")) requiredData.put("n", "integer");
+            if (type.equals("for")) { requiredData.put("first", "integer"); requiredData.put("last", "integer"); requiredData.put("step", "integer"); }
+            if (type.equals("for-each")) requiredData.put("items", "list:" + scriptValueType(value(definition, "element-type", "string"), definition));
+            if (type.equals("set-variable")) requiredData.put("value", variableTypes.getOrDefault(value(definition, "variable", ""), "string"));
+            if (type.startsWith("set-player-flag")) { requiredData.put("name", "string"); requiredData.put("value", "boolean"); }
+            if (type.startsWith("set-player-string")) { requiredData.put("name", "string"); requiredData.put("value", "string"); }
+            if (type.startsWith("set-global-npc-memory") || type.startsWith("set-player-npc-memory")) {
+                requiredData.put("key", "string"); requiredData.put("value", scriptValueType(value(definition, "value-type", "string"), definition));
+            }
+            if (type.equals("run-script")) {
+                YamlDocumentNode target = reusableDescriptor(value(definition, "script", ""));
+                if (target == null) diagnostic("MISSING_SCRIPT", "ERROR", "Run-script target does not exist", definition, nodeId,
+                        "script", value(definition, "script", ""));
+                else {
+                    YamlDocumentNode inputs = child(target, "inputs"), outputs = child(target, "outputs");
+                    if (inputs != null) for (YamlDocumentNode parameter : inputs.children())
+                        requiredData.put(parameter.key(), scriptValueType(value(parameter, "type", "string"), parameter));
+                    if (outputs != null) for (YamlDocumentNode parameter : outputs.children())
+                        add.accept(typedPin(nodeId, "output", "DATA", scriptValueType(value(parameter, "type", "string"), parameter),
+                                false, parameter.key(), definition.path(), pins.size(), null, null));
+                }
+            } else if (type.contains(":") && signed("command", type)) extensionCommandPins(definition, nodeId, nodeKey, type, pins, endpoints);
+            else for (String field : scriptCommandFields(type)) requiredData.putIfAbsent(field, scriptFieldType(type, field));
+            for (var entry : requiredData.entrySet()) {
+                if (pins.stream().anyMatch(pin -> pin.label().equals(entry.getKey()))) continue;
+                YamlDocumentNode inputContainer = type.equals("run-script") ? child(definition, "inputs") : definition;
+                YamlDocumentNode literal = child(inputContainer, entry.getKey());
+                add.accept(typedPin(nodeId, "input", "DATA", entry.getValue(), requiredScriptField(type, entry.getKey()), entry.getKey(),
+                        literal == null ? definition.path() + (type.equals("run-script") ? "/inputs/" : "/") + entry.getKey() : literal.path(), pins.size(),
+                        literal == null ? null : literal.value(), null));
+            }
+            if (type.equals("do-n")) add.accept(typedPin(nodeId, "output", "DATA", "integer", false, "count", definition.path(), pins.size(), null, null));
+            if (type.equals("for")) add.accept(typedPin(nodeId, "output", "DATA", "integer", false, "index", definition.path(), pins.size(), null, null));
+            if (type.equals("for-each")) {
+                add.accept(typedPin(nodeId, "output", "DATA", scriptValueType(value(definition, "element-type", "string"), definition), false, "item", definition.path(), pins.size(), null, null));
+                add.accept(typedPin(nodeId, "output", "DATA", "integer", false, "index", definition.path(), pins.size(), null, null));
+            }
+            if (type.equals("set-variable")) add.accept(typedPin(nodeId, "output", "DATA", requiredData.get("value"), false, "result", definition.path(), pins.size(), null, null));
+            return pins;
+        }
+
+        private YamlDocumentNode reusableDescriptor(String id) {
+            for (ContentFile file : request.projectFiles()) {
+                if (!file.path().startsWith("scripts/")) continue;
+                YamlDocumentNode root = documents.parse(file.content()).root();
+                if (id.equals(value(root, "id", ""))) return root;
+            }
+            return null;
+        }
+
+        private void directNode(String id, YamlDocumentNode source, String kind, String title, String subtitle,
+                                List<GraphPin> pins, List<String> badges) {
+            directNode(id, source, kind, title, subtitle, pins, badges, source.path());
+        }
+
+        private void directNode(String id, YamlDocumentNode source, String kind, String title, String subtitle,
+                                List<GraphPin> pins, List<String> badges, String yamlPath) {
+            if (nodes.stream().anyMatch(node -> node.id().equals(id))) return;
+            GraphNode node = new GraphNode(id, yamlPath, range(source), kind, title, subtitle,
+                    source.path().equals(yamlPath) ? fields(source, false) : List.of(), pins, badges, false, null);
+            nodes.add(node); nodeIndexById.put(id, nodes.size() - 1); nodeByPath.putIfAbsent(yamlPath, id);
+            represented.add(source.path());
+        }
+
+        private void graphEdge(String id, GraphPin source, GraphPin target, String sourcePath, String targetPath, String label) {
+            if (!edgeIds.add(id)) throw error(HttpStatus.UNPROCESSABLE_ENTITY, "DUPLICATE_EDGE",
+                    "Projection contains a duplicate connection ID", request.path(), sourcePath);
+            edges.add(new GraphEdge(id, source.id(), target.id(), source.channel().equals("EXECUTION") ? "execution"
+                    : "data:" + source.valueType(), label, sourcePath, targetPath, true, false,
+                    source.sourceRange(), target.sourceRange()));
+        }
+
+        private static boolean pureGraphNode(String type) {
+            return type.equals("value") || type.equals("get-variable") || type.startsWith("get-player-")
+                    || type.startsWith("get-global-npc-memory") || type.startsWith("get-player-npc-memory")
+                    || Set.of("integer-to-number", "string-to-text", "to-string").contains(type);
+        }
+
+        private static boolean flowGraphNode(String type) {
+            return Set.of("sequence", "branch", "if", "switch", "random", "gate", "do-once", "do-n",
+                    "for", "for-each", "while").contains(type);
+        }
+
+        private static int integerValue(YamlDocumentNode node, String key, int fallback) {
+            try { return Integer.parseInt(value(node, key, Integer.toString(fallback))); }
+            catch (NumberFormatException ignored) { return fallback; }
+        }
+
+        private static String title(String key) {
+            return Arrays.stream(key.split("-")).map(value -> value.isBlank() ? value
+                    : Character.toUpperCase(value.charAt(0)) + value.substring(1)).collect(java.util.stream.Collectors.joining(" "));
+        }
+
+        @SuppressWarnings("unused")
+        private void legacyScriptProjection(YamlDocumentNode root) {
             if(!"mapping".equals(root.kind())||child(root,"nodes")==null||child(root,"connections")==null)
                 throw error(HttpStatus.UNPROCESSABLE_ENTITY,"SCRIPT_FORMAT_MIGRATION_REQUIRED",
-                        "Reusable scripts must use scripts.yml content-version 2 descriptors",request.path(),root.path());
+                        "Reusable scripts require one content-version 2 descriptor per scripts/**/*.yml file",request.path(),root.path());
             String inputId=request.resourceKind()+":"+request.resourceId()+"#input",outputId=request.resourceKind()+":"+request.resourceId()+"#output";
             Map<String,GraphPin> endpointPins=new LinkedHashMap<>();
             List<GraphPin> inputPins=new ArrayList<>(),outputPins=new ArrayList<>();
@@ -498,14 +851,17 @@ public final class GraphProjectionService {
             YamlDocumentNode connections=child(root,"connections");Set<String> targets=new HashSet<>();for(YamlDocumentNode connection:connections.children()){String from=value(connection,"from",""),to=value(connection,"to","");GraphPin source=endpointPins.get(from),target=endpointPins.get(to);if(source==null||target==null)throw error(HttpStatus.UNPROCESSABLE_ENTITY,"MISSING_PIN_ENDPOINT","Connection "+connection.key()+" references a missing pin",request.path(),connection.path());if(!targets.add(target.id()))throw error(HttpStatus.UNPROCESSABLE_ENTITY,"CARDINALITY_EXCEEDED","Data/execution inputs accept only one connection",request.path(),connection.path());if(!source.channel().equals(target.channel())||source.channel().equals("DATA")&&!source.valueType().equals(target.valueType()))throw error(HttpStatus.UNPROCESSABLE_ENTITY,"INCOMPATIBLE_PIN_TYPES","Connection "+connection.key()+" has incompatible channel or nominal types",request.path(),connection.path());edges.add(new GraphEdge("script-edge:"+pinToken(connection.key()),source.id(),target.id(),source.channel().equals("EXECUTION")?"execution":"data:"+source.valueType(),connection.key(),connection.path()+"/from",connection.path()+"/to",true,false,range(child(connection,"from")),range(child(connection,"to"))));}
         }
 
-        private GraphPin typedPin(String nodeId,String direction,String channel,String valueType,boolean required,String label,String path,int order,String literal,String defaultValue){String id=nodeId+":"+direction.toLowerCase(Locale.ROOT)+":"+pinToken(label);String semantic=channel.equals("EXECUTION")?"execution":"data:"+valueType;return new GraphPin(id,nodeId,direction,semantic,required?"EXACTLY_ONE":"ZERO_OR_ONE",required,label,path,order,null,new PortCompatibility(List.of(semantic),List.of("CURRENT_RESOURCE"),"DENY",List.of("CONNECT")),channel,valueType,new LiteralMetadata(literal,defaultValue,defaultValue!=null,false,channel.equals("DATA")&&direction.equals("input")),scriptResourceKind(valueType));}
+        private GraphPin typedPin(String nodeId,String direction,String channel,String valueType,boolean required,String label,String path,int order,String literal,String defaultValue){String id=nodeId+":"+direction.toLowerCase(Locale.ROOT)+":"+pinToken(label);String semantic=channel.equals("EXECUTION")?"execution":"data:"+valueType;boolean literalEditable=channel.equals("DATA")&&direction.equals("input")&&!Set.of("player","npc-instance","condition","dialogue-registration").contains(valueType);return new GraphPin(id,nodeId,direction,semantic,required?"EXACTLY_ONE":"ZERO_OR_ONE",required,label,path,order,null,new PortCompatibility(List.of(semantic),List.of("CURRENT_RESOURCE"),"DENY",List.of("CONNECT")),channel,valueType,new LiteralMetadata(literal,defaultValue,defaultValue!=null,false,literalEditable),scriptResourceKind(valueType));}
         private void extensionCommandPins(YamlDocumentNode definition,String nodeId,String nodeKey,String type,List<GraphPin> pins,Map<String,GraphPin> endpointPins){EditorSchemaDocument schema=signedSchemas.get("command\0"+type);if(schema==null)return;try{JsonNode root=JSON.readTree(schema.schemaJson());int order=0;for(JsonNode pinNode:root.path("x-persona-input-pins")){String name=pinNode.path("name").asText(),valueType=scriptValueType(pinNode.path("valueType").asText(),definition);boolean required=pinNode.path("required").asBoolean(false);YamlDocumentNode literal=child(definition,name);String defaultValue=pinNode.has("default")?pinNode.path("default").asText():null;GraphPin pin=typedPin(nodeId,"input","DATA",valueType,required,name,literal==null?definition.path()+"/"+name:literal.path(),order++,literal==null?null:literal.value(),defaultValue);pins.add(pin);endpointPins.put(nodeKey+"."+name,pin);}for(JsonNode pinNode:root.path("x-persona-output-pins")){String name=pinNode.path("name").asText(),valueType=scriptValueType(pinNode.path("valueType").asText(),definition);GraphPin pin=typedPin(nodeId,"output","DATA",valueType,false,name,definition.path(),order++,null,null);pins.add(pin);endpointPins.put(nodeKey+"."+name,pin);}}catch(GraphContractException invalid){throw invalid;}catch(Exception invalid){diagnostic("INVALID_EXTENSION_PIN_SCHEMA","ERROR","Signed extension pin metadata is invalid",definition,nodeId,"command",type);}}
         private String childValue(YamlDocumentNode node,String key){YamlDocumentNode child=child(node,key);return child==null?null:child.value();}
-        private String scriptValueType(String type,YamlDocumentNode source){if(type.contains(":")&&!signedValueTypes.contains(type))throw error(HttpStatus.UNPROCESSABLE_ENTITY,"UNSIGNED_EXTENSION_VALUE_TYPE","Nominal value type "+type+" is not declared by the signed extension catalog",request.path(),source.path());return type;}
+        private String scriptValueType(String type,YamlDocumentNode source){
+            if(type.startsWith("list:")){String element=type.substring(5);if(element.isBlank()||element.startsWith("list:"))throw error(HttpStatus.UNPROCESSABLE_ENTITY,"INVALID_LIST_VALUE_TYPE","Lists require one declared scalar element type",request.path(),source.path());scriptValueType(element,source);return type;}
+            if(type.contains(":")&&!signedValueTypes.contains(type))throw error(HttpStatus.UNPROCESSABLE_ENTITY,"UNSIGNED_EXTENSION_VALUE_TYPE","Nominal value type "+type+" is not declared by the signed extension catalog",request.path(),source.path());return type;
+        }
         private String scriptResourceKind(String type){return Set.of("npc","npc-instance","behavior","dialogue","quest","quest-objective","script","anchor","world","material","entity-type","sound","particle").contains(type)?type:null;}
-        private String scriptFieldType(String command,String key){if(command.equals("set-flag")&&key.equals("value")||Set.of("ambient","particles").contains(key))return "boolean";return switch(key){case "quest"->"quest";case "objective"->"quest-objective";case "amount","count","amplifier"->"integer";case "volume","pitch","radius","offset-x","offset-y","offset-z","extra"->"number";case "duration","fade-in","stay","fade-out"->"duration";case "location"->"location";case "material"->"material";case "entity"->"entity-type";case "sound"->"sound";case "particle"->"particle";case "text","title","subtitle"->"text";case "script"->"script";case "dialogue"->"dialogue";case "behavior"->"behavior";case "npc"->"npc";case "world"->"world";case "anchor"->"anchor";default->"string";};}
-        private boolean requiredScriptField(String command,String field){return switch(command){case "say"->field.equals("text");case "wait"->field.equals("duration");case "start-quest","finish-quest"->field.equals("quest");case "deliver-items"->Set.of("quest","objective").contains(field);case "give-item","take-item","set-block"->field.equals("material");case "message","action-bar","broadcast","npc-speak"->field.equals("text");case "play-sound"->field.equals("sound");case "particle"->field.equals("particle");case "run-command"->field.equals("command");case "spawn-entity"->field.equals("entity");default->false;};}
-        private Set<String> scriptCommandFields(String type){return switch(type){case "say"->Set.of("text","delay");case "wait"->Set.of("duration");case "start-quest","finish-quest"->Set.of("quest");case "deliver-items"->Set.of("quest","objective");case "set-flag"->Set.of("flag","value");case "set-variable"->Set.of("variable","name","value","operation");case "message","action-bar","broadcast","npc-speak"->Set.of("text","audience","radius","location");case "title"->Set.of("title","subtitle","fade-in","stay","fade-out","audience","radius","location");case "play-sound"->Set.of("sound","volume","pitch","audience","radius","location");case "particle"->Set.of("particle","count","offset-x","offset-y","offset-z","extra","audience","radius","location");case "give-item","take-item"->Set.of("material","amount");case "give-experience"->Set.of("amount");case "run-command"->Set.of("command","as");case "teleport","lightning-effect","npc-move"->Set.of("location");case "potion-effect"->Set.of("effect","duration","amplifier","ambient","particles");case "spawn-entity"->Set.of("entity","location");case "set-block"->Set.of("material","location");case "npc-animation"->Set.of("animation");default->Set.of();};}
+        private String scriptFieldType(String command,String key){if(command.equals("set-flag")&&key.equals("value")||Set.of("ambient","particles").contains(key))return "boolean";return switch(key){case "player"->"player";case "quest"->"quest";case "objective"->"quest-objective";case "amount","count","amplifier"->"integer";case "volume","pitch","radius","offset-x","offset-y","offset-z","extra"->"number";case "duration","fade-in","stay","fade-out"->"duration";case "location"->"location";case "material"->"material";case "entity"->"entity-type";case "sound"->"sound";case "particle"->"particle";case "text","title","subtitle"->"text";case "script"->"script";case "dialogue"->"dialogue";case "behavior"->"behavior";case "npc"->"npc";case "world"->"world";case "anchor"->"anchor";default->"string";};}
+        private boolean requiredScriptField(String command,String field){if(field.equals("player")&&PLAYER_TARGET_COMMANDS.contains(command))return true;return switch(command){case "say"->field.equals("text");case "wait"->field.equals("duration");case "start-quest","finish-quest"->field.equals("quest");case "deliver-items"->Set.of("quest","objective").contains(field);case "give-item","take-item","set-block"->field.equals("material");case "message","action-bar","broadcast","npc-speak"->field.equals("text");case "play-sound"->field.equals("sound");case "particle"->field.equals("particle");case "run-command"->field.equals("command");case "spawn-entity"->field.equals("entity");default->false;};}
+        private Set<String> scriptCommandFields(String type){Set<String> fields=switch(type){case "say"->Set.of("text","delay");case "wait"->Set.of("duration");case "start-quest","finish-quest"->Set.of("quest");case "deliver-items"->Set.of("quest","objective");case "set-flag"->Set.of("flag","value");case "set-variable"->Set.of("variable","name","value","operation");case "message","action-bar","broadcast","npc-speak"->Set.of("text","audience","radius","location");case "title"->Set.of("title","subtitle","fade-in","stay","fade-out","audience","radius","location");case "play-sound"->Set.of("sound","volume","pitch","audience","radius","location");case "particle"->Set.of("particle","count","offset-x","offset-y","offset-z","extra","audience","radius","location");case "give-item","take-item"->Set.of("material","amount");case "give-experience"->Set.of("amount");case "run-command"->Set.of("command","as");case "teleport","lightning-effect","npc-move"->Set.of("location");case "potion-effect"->Set.of("effect","duration","amplifier","ambient","particles");case "spawn-entity"->Set.of("entity","location");case "set-block"->Set.of("material","location");case "npc-animation"->Set.of("animation");default->Set.of();};if(!PLAYER_TARGET_COMMANDS.contains(type))return fields;Set<String> targeted=new LinkedHashSet<>();targeted.add("player");targeted.addAll(fields);return targeted;}
 
         private void other(YamlDocumentNode root) {
             addCustom(root, "Custom YAML");
@@ -755,7 +1111,8 @@ public final class GraphProjectionService {
                     List.of("SELECT", "PAN_ZOOM", "AUTO_LAYOUT", "INSPECT", "EDIT_FIELDS",
                             "CREATE_NODE", "DELETE_NODE", "CONNECT", "DISCONNECT", "RECONNECT",
                             "INSERT_ON_WIRE", "REORDER", "COMPOUND", "COPY", "DUPLICATE", "WRAP", "UNWRAP",
-                            "EDIT_PIN_DEFAULT","CREATE_VALUE_NODE","REMOVE_VALUE_NODE","EDIT_SCRIPT_SIGNATURE"), schemaCatalogVersion, null,
+                            "EDIT_PIN_DEFAULT","CREATE_VALUE_NODE","REMOVE_VALUE_NODE","EDIT_SCRIPT_SIGNATURE",
+                            "EDIT_VARIABLES"), schemaCatalogVersion, null,
                     List.of(), List.of(), List.of(), List.of(), Map.of());
         }
 
@@ -862,6 +1219,14 @@ public final class GraphProjectionService {
         }
         private static String escape(String value) { return value.replace("~", "~0").replace("/", "~1"); }
         private static String pinToken(String value) { return (value == null ? "" : value).replaceAll("[^A-Za-z0-9_.:-]", "_"); }
+        private static String pinName(String value) { String result = Objects.toString(value, "").toLowerCase(Locale.ROOT)
+                .replaceAll("[^a-z0-9_.-]+", "-").replaceAll("^-+|-+$", ""); return result.isBlank() ? "value" : result; }
+        private static Map<String, String> orderedTypes(String... entries) {
+            if (entries.length % 2 != 0) throw new IllegalArgumentException("Type entries must be key/value pairs");
+            Map<String, String> result = new LinkedHashMap<>();
+            for (int index = 0; index < entries.length; index += 2) result.put(entries[index], entries[index + 1]);
+            return result;
+        }
         private static void visit(YamlDocumentNode node, java.util.function.Consumer<YamlDocumentNode> action) {
             if (node == null) return; action.accept(node); node.children().forEach(child -> visit(child, action));
         }

@@ -32,17 +32,29 @@ public final class ProjectContentRules {
             bytes += file.content().getBytes(StandardCharsets.UTF_8).length;
             if (bytes > MAX_BYTES) throw bad("PROJECT_BYTE_LIMIT", "Project exceeds 10 MiB");
         }
+        ProjectPathRules.Manifest manifest=ProjectPathRules.manifest(List.copyOf(files.values()));
+        for(String folder:manifest.folders()){
+            String parent=ProjectPathRules.folderOf(folder);
+            if(parent.contains("/")&&!manifest.folders().contains(parent))
+                throw bad("MISSING_PARENT_FOLDER","Folder "+folder+" requires declared parent "+parent);
+        }
+        for(String path:files.keySet())if(!ProjectPathRules.MANIFEST_PATH.equals(path)){
+            String folder=ProjectPathRules.folderOf(path);
+            if(folder.contains("/")&&!manifest.folders().contains(folder))
+                throw bad("MISSING_FOLDER","Resource path "+path+" uses an undeclared folder");
+        }
+        for(String folder:manifest.folders())if(files.keySet().stream().anyMatch(path->path.equalsIgnoreCase(folder+".yml")||path.equalsIgnoreCase(folder+".yaml")))throw bad("PATH_COLLISION","A folder path collides with a resource path");
         String revision = ContentProjectRevision.compute(List.copyOf(files.values()));
         if (expectedRevision == null || !MessageDigest.isEqual(revision.getBytes(StandardCharsets.US_ASCII),
                 expectedRevision.getBytes(StandardCharsets.US_ASCII)))
             throw conflict("STALE_PROJECT", "The submitted project digest is stale");
-        return new VerifiedProject(files, revision, bytes);
+        return new VerifiedProject(files, revision, bytes,manifest.folders(),manifest.digest());
     }
 
     public String safePath(String kind, String id) {
         requireKindAndId(kind, id);
-        if (kind.equals("script")) return "scripts.yml";
         String name = id.substring(id.indexOf(':') + 1).replaceAll("[^a-z0-9_.-]", "-");
+        if(kind.equals("script")){name=id.substring(id.lastIndexOf(':')+1).replaceAll("[^a-z0-9_.-]","-");return "scripts/"+name+".yml";}
         return switch (kind) {
             case "behavior" -> "behaviors/" + name + ".yml";
             case "dialogue" -> "dialogues/" + name + ".yml";
@@ -63,8 +75,9 @@ public final class ProjectContentRules {
     }
 
     public void requireRequestedPath(String kind, String id, String path) {
-        if (!Objects.equals(safePath(kind, id), path))
-            throw bad("INVALID_PATH", "The requested path does not match the safe path for this content ID");
+        requireKindAndId(kind,id);
+        if (!ProjectPathRules.validResourcePath(kind,path))
+            throw bad("INVALID_PATH", "The requested path must be a validated YAML file beneath the matching kind root");
     }
 
     public ContentFile file(String path, String content) {
@@ -80,9 +93,7 @@ public final class ProjectContentRules {
     }
 
     private static boolean validPath(String path) {
-        if (path == null || path.isBlank() || path.length() > 240 || path.startsWith("/") || path.contains("\\")
-                || path.contains("\0") || !(path.endsWith(".yml") || path.endsWith(".yaml"))) return false;
-        return Arrays.stream(path.split("/", -1)).noneMatch(part -> part.isBlank() || part.equals(".") || part.equals(".."));
+        return ProjectPathRules.MANIFEST_PATH.equals(path)||ProjectPathRules.validResourcePath(path);
     }
 
     private static String sha256(String content) {
@@ -99,5 +110,5 @@ public final class ProjectContentRules {
         return new ProjectOperationException(HttpStatus.CONFLICT, code, message, null, null);
     }
 
-    public record VerifiedProject(TreeMap<String, ContentFile> files, String revision, long bytes) {}
+    public record VerifiedProject(TreeMap<String, ContentFile> files, String revision, long bytes,Set<String> folders,String manifestDigest) {}
 }

@@ -16,7 +16,7 @@ class ProjectReferenceServiceTest {
                 file("behaviors/guide.yml", "id: demo:guide\nscope: player\nroot: {id: wait, type: wait, duration: 1s}\n"),
                 file("dialogues/welcome.yml", "id: demo:welcome\nstart: hello\nnodes: {hello: {text: Hi}}\n"),
                 file("npcs/guide.yml", "id: demo:npc\nplayer-behavior: demo:guide\ndialogues:\n  - id: demo:welcome\n  - id: demo:missing\n"),
-                file("scripts.yml", "scripts:\n  greet:\n    - {type: run-script, script: absent}\n"));
+                file("scripts/greet.yml", "content-version: 2\nid: greet\ninputs: {}\noutputs: {}\nvariables: {}\nnodes:\n  call: {type: run-script, script: absent}\nconnections: {}\n"));
 
         ProjectReferenceGraph graph = references.analyze(files);
 

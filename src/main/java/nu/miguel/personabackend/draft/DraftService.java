@@ -14,6 +14,7 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Instant;
 import java.util.*;
+import nu.miguel.personabackend.project.ProjectPathRules;
 import java.util.concurrent.ConcurrentHashMap;
 import nu.miguel.personabackend.security.QuotaProperties;
 import nu.miguel.personabackend.security.RateLimitService;
@@ -164,18 +165,14 @@ public final class DraftService {
     }
 
     private static boolean validPath(String path) {
-        if (path == null || path.isBlank() || path.startsWith("/") || path.contains("\\") || path.contains("\u0000")) return false;
-        String[] parts = path.split("/");
-        if (Arrays.stream(parts).anyMatch(part -> part.isBlank() || part.equals(".") || part.equals(".."))) return false;
-        String lower = path.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".yml") || lower.endsWith(".yaml");
+        return ProjectPathRules.MANIFEST_PATH.equals(path) || ProjectPathRules.validResourcePath(path);
     }
 
     private static boolean allowed(EditorScope scope, String path) {
         return switch (scope) {
-            case ALL, CONTENT -> path.equals("scripts.yml") || path.startsWith("behaviors/")
+            case ALL, CONTENT -> path.equals(ProjectPathRules.MANIFEST_PATH) || path.startsWith("scripts/") || path.startsWith("behaviors/")
                     || path.startsWith("npcs/") || path.startsWith("dialogues/") || path.startsWith("quests/");
-            case SCRIPTS -> path.equals("scripts.yml");
+            case SCRIPTS -> path.startsWith("scripts/");
             case BEHAVIORS -> path.startsWith("behaviors/");
             case NPCS -> path.startsWith("npcs/");
             case DIALOGUES -> path.startsWith("dialogues/");

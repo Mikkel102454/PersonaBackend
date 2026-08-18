@@ -4,10 +4,10 @@ import { defaultNodeRenderers } from './node-renderer.js';
 import { connectionCompatibility } from './connection-rules.js';
 import { normalizeProjection } from './graph-projection.js';
 import { GraphSelection } from './graph-selection.js';
-import { renderGraphMinimap } from './graph-minimap.js';
 
 const SVG = 'http://www.w3.org/2000/svg';
 const NODE_WIDTH = 220, NODE_HEIGHT = 130;
+const VIRTUALIZATION_THRESHOLD = 500;
 
 export class GraphCanvas {
   constructor(options) {
@@ -17,7 +17,6 @@ export class GraphCanvas {
     this.plane = document.querySelector('#graph-plane');
     this.nodesLayer = document.querySelector('#graph-nodes');
     this.wires = document.querySelector('#graph-wires');
-    this.minimap = document.querySelector('#graph-minimap');
     this.marquee = document.querySelector('#graph-marquee');
     this.empty = document.querySelector('#graph-empty');
     this.zoomOutput = document.querySelector('#graph-zoom');
@@ -28,9 +27,16 @@ export class GraphCanvas {
     this.comments = [];
     this.groups = [];
     this.bookmarks = new Set();
+    this.viewportBookmarks = [];
     this.colors = {};
     this.collapsed = new Set();
     this.reroutes = {};
+    this.tracepoints = new Set();
+    this.watchedPins = new Set();
+    this.traceRing = [];
+    this.traceNodeKeys = new Set();
+    this.watchedValues = new Map();
+    this.spaceHeld = false;
     this.liveNodeKeys = new Set();
     this.diagnosticPaths = new Set();
     this.focusedNodes = null;
@@ -38,7 +44,10 @@ export class GraphCanvas {
     this.pendingReconnectEdge = null;
     this.previewPath = null;
     this.renderFrame = null;
-    this.minimapFrame = null;
+    this.wireFrame = null;
+    this.renderedNodeIds = new Set();
+    this.renderedProjection = null;
+    this.nodeResizeObserver = new ResizeObserver(() => this.scheduleWires());
     this.bind();
   }
 
@@ -46,34 +55,35 @@ export class GraphCanvas {
     this.canvas.addEventListener('wheel', event => this.zoom(event), { passive: false });
     this.canvas.addEventListener('pointerdown', event => this.pointerDown(event));
     this.canvas.addEventListener('keydown', event => this.keydown(event));
-    this.canvas.addEventListener('dragover',event=>{if(event.dataTransfer?.types?.includes('application/x-persona-resource')&&this.projection?.resourceKind==='script'){event.preventDefault();event.dataTransfer.dropEffect='copy';}});
-    this.canvas.addEventListener('drop',event=>{const raw=event.dataTransfer?.getData('application/x-persona-resource');if(!raw||this.projection?.resourceKind!=='script')return;event.preventDefault();try{const resource=JSON.parse(raw),bounds=this.canvas.getBoundingClientRect(),element=document.elementFromPoint(event.clientX,event.clientY)?.closest?.('.graph-pin'),target=element?this.pin(element.dataset.pinId):null,source={id:'dragged-resource',nodeId:'dragged-resource',direction:'output',channel:'DATA',valueType:resource.kind,semanticType:`data:${resource.kind}`,cardinality:'single'};if(target){const check=this.compatible(source,target);if(!check.valid){this.options.onConnectionError?.(check.reason);return;}}this.options.onResourceDrop?.(resource,{x:(event.clientX-bounds.left-this.viewport.x)/this.viewport.zoom,y:(event.clientY-bounds.top-this.viewport.y)/this.viewport.zoom},target);}catch{this.options.onConnectionError?.('The dragged resource payload is invalid.');}});
+    this.canvas.addEventListener('keyup', event => { if (event.code === 'Space') this.spaceHeld = false; });
+    this.canvas.addEventListener('blur', () => { this.spaceHeld = false; });
+    this.canvas.addEventListener('dragover',event=>{if(event.dataTransfer?.types?.includes('application/x-persona-resource')&&['npc','dialogue','quest','script'].includes(this.projection?.resourceKind)){event.preventDefault();event.dataTransfer.dropEffect='copy';}});
+    this.canvas.addEventListener('drop',event=>{const raw=event.dataTransfer?.getData('application/x-persona-resource');if(!raw||!['npc','dialogue','quest','script'].includes(this.projection?.resourceKind))return;event.preventDefault();try{const resource=JSON.parse(raw),bounds=this.canvas.getBoundingClientRect(),element=document.elementFromPoint(event.clientX,event.clientY)?.closest?.('.graph-pin'),target=element?this.pin(element.dataset.pinId):null,source={id:'dragged-resource',nodeId:'dragged-resource',direction:'output',channel:'DATA',valueType:resource.kind,semanticType:`data:${resource.kind}`,cardinality:'single'};if(target){const check=this.compatible(source,target);if(!check.valid){this.options.onConnectionError?.(check.reason);return;}}this.options.onResourceDrop?.(resource,{x:(event.clientX-bounds.left-this.viewport.x)/this.viewport.zoom,y:(event.clientY-bounds.top-this.viewport.y)/this.viewport.zoom},target);}catch{this.options.onConnectionError?.('The dragged resource payload is invalid.');}});
     this.canvas.addEventListener('contextmenu', event => {
       if (event.target.closest('.graph-node-card, .graph-pin')) return;
       event.preventDefault();
       this.options.onPalette?.({ clientX: event.clientX, clientY: event.clientY, sourcePin: null });
     });
     document.querySelector('#graph-fit').addEventListener('click', () => this.zoomToFit());
-    document.querySelector('#graph-reset').addEventListener('click', () => { this.viewport = normalizeViewport(null); this.applyViewport(); this.changed(); });
+    document.querySelector('#graph-reset').addEventListener('click', () => { this.viewport = normalizeViewport(null); this.applyViewport(); this.scheduleViewportRender(); this.changed(); });
+    document.querySelector('#graph-find').addEventListener('click', () => this.findCurrentGraph());
+    document.querySelector('#graph-bookmark-view').addEventListener('click', () => this.bookmarkViewport());
+    document.querySelector('#graph-jump-view').addEventListener('click', () => this.quickJump());
     document.querySelector('#graph-grid').addEventListener('click', event => {
       const enabled = this.canvas.classList.toggle('grid');
       event.currentTarget.setAttribute('aria-pressed', String(enabled));
-    });
-    this.minimap.addEventListener('pointerdown', event => this.panFromMinimap(event));
-    this.minimap.addEventListener('keydown', event => {
-      if (!['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
-      event.preventDefault(); const amount = event.shiftKey ? 160 : 40;
-      if (event.key === 'ArrowLeft') this.viewport.x += amount;
-      if (event.key === 'ArrowRight') this.viewport.x -= amount;
-      if (event.key === 'ArrowUp') this.viewport.y += amount;
-      if (event.key === 'ArrowDown') this.viewport.y -= amount;
-      this.applyViewport(); this.schedule(); this.changed();
     });
     new ResizeObserver(() => this.schedule()).observe(this.canvas);
   }
 
   setProjection(projection, layout) {
     projection = normalizeProjection(projection);
+    if (this.wireFrame) cancelAnimationFrame(this.wireFrame);
+    this.wireFrame = null;
+    this.renderedProjection = null;
+    if (this.projection?.resourceIdentity !== projection.resourceIdentity) {
+      this.traceRing = []; this.traceNodeKeys.clear(); this.watchedValues.clear();
+    }
     this.projection = projection;
     this.focusedNodes = null;
     const defaults = deterministicLayout(projection);
@@ -85,10 +95,15 @@ export class GraphCanvas {
     this.groups = Array.isArray(layout?.groups) ? layout.groups.map(group => ({ ...group,
       nodeIds: (group.nodeIds || []).filter(id => ids.has(id)).slice(0, 500) })).filter(group => group.nodeIds.length).slice(0, 100) : [];
     this.bookmarks = new Set((layout?.bookmarks || []).filter(id => ids.has(id)));
+    this.viewportBookmarks = Array.isArray(layout?.viewportBookmarks) ? layout.viewportBookmarks
+      .filter(value => value?.name && value.viewport).slice(0, 50).map(value => this.normalizeViewportBookmark(value)) : [];
     this.colors = Object.fromEntries(Object.entries(layout?.colors || {}).filter(([id, color]) => ids.has(id) && /^#[0-9a-f]{6}$/i.test(color)));
     this.collapsed = new Set((layout?.collapsed || []).filter(id => ids.has(id)));
     const edgeIds = new Set((projection.edges || []).map(edge => edge.id));
     this.reroutes = Object.fromEntries(Object.entries(layout?.reroutes || {}).filter(([id]) => edgeIds.has(id)));
+    this.tracepoints = new Set((layout?.tracepoints || []).filter(id => ids.has(id)));
+    const pinIds = new Set(projection.nodes.flatMap(node => (node.pins || []).map(pin => pin.id)));
+    this.watchedPins = new Set((layout?.watchedPins || []).filter(id => pinIds.has(id)));
     this.cancelPinConnection();
     this.empty.hidden = Boolean(projection.nodes?.length);
     this.schedule();
@@ -97,18 +112,24 @@ export class GraphCanvas {
 
   clear() {
     this.projection = null; this.positions = {}; this.selection.clear(); this.comments = []; this.groups = [];
-    this.bookmarks.clear(); this.colors = {}; this.collapsed.clear();
+    this.bookmarks.clear(); this.viewportBookmarks=[]; this.colors = {}; this.collapsed.clear(); this.tracepoints.clear(); this.watchedPins.clear();
+    this.traceRing = [];
+    this.traceNodeKeys.clear(); this.watchedValues.clear();
     this.focusedNodes = null;
     this.reroutes = {};
     this.cancelPinConnection();
-    if (this.minimapFrame) cancelAnimationFrame(this.minimapFrame); this.minimapFrame = null;
-    this.nodesLayer.replaceChildren(); this.wires.replaceChildren(); this.minimap.replaceChildren();
+    if (this.wireFrame) cancelAnimationFrame(this.wireFrame); this.wireFrame = null;
+    this.nodeResizeObserver.disconnect();
+    this.renderedNodeIds.clear();
+    this.renderedProjection = null;
+    this.nodesLayer.replaceChildren(); this.wires.replaceChildren();
     this.empty.hidden = false; this.options.onSelection([]);
   }
 
   restoreLayout(layout) {
     if (!this.projection || !layout) return;
     const defaults = deterministicLayout(this.projection), ids = new Set(this.projection.nodes.map(node => node.id));
+    const pinIds = new Set(this.projection.nodes.flatMap(node => (node.pins || []).map(pin => pin.id)));
     this.positions = { ...defaults, ...Object.fromEntries(Object.entries(layout.positions || {})
       .filter(([id, point]) => ids.has(id) && Number.isFinite(point?.x) && Number.isFinite(point?.y))) };
     this.viewport = normalizeViewport(layout.viewport);
@@ -116,9 +137,13 @@ export class GraphCanvas {
     this.comments = Array.isArray(layout.comments) ? structuredClone(layout.comments.slice(0, 200)) : this.comments;
     this.groups = Array.isArray(layout.groups) ? structuredClone(layout.groups.slice(0, 100)) : this.groups;
     this.bookmarks = new Set(Array.isArray(layout.bookmarks) ? layout.bookmarks.filter(id => ids.has(id)) : this.bookmarks);
+    this.viewportBookmarks = Array.isArray(layout.viewportBookmarks) ? layout.viewportBookmarks
+      .filter(value => value?.name && value.viewport).slice(0,50).map(value=>this.normalizeViewportBookmark(value)) : this.viewportBookmarks;
     this.colors = layout.colors ? { ...layout.colors } : this.colors;
     this.collapsed = new Set(Array.isArray(layout.collapsed) ? layout.collapsed.filter(id => ids.has(id)) : this.collapsed);
     this.reroutes = layout.reroutes ? structuredClone(layout.reroutes) : this.reroutes;
+    this.tracepoints = new Set(Array.isArray(layout.tracepoints) ? layout.tracepoints.filter(id => ids.has(id)) : this.tracepoints);
+    this.watchedPins = new Set(Array.isArray(layout.watchedPins) ? layout.watchedPins.filter(id => pinIds.has(id)) : this.watchedPins);
     this.schedule(); this.applyViewport(); this.changed();
     this.options.onSelection(this.projection.nodes.filter(node => this.selection.has(node.id)));
   }
@@ -131,7 +156,22 @@ export class GraphCanvas {
     notice.hidden = !stale;
   }
 
-  setLiveNodeKeys(keys) { this.liveNodeKeys = new Set(keys || []); this.schedule(); }
+  setLiveNodeKeys(keys) { const next = new Set(keys || []); const at = Date.now();
+    for (const node of this.projection?.nodes || []) if (this.tracepoints.has(node.id)
+      && (next.has(node.title) || next.has(node.yamlPath)) && !this.liveNodeKeys.has(node.title) && !this.liveNodeKeys.has(node.yamlPath))
+      this.traceRing.push({ at, nodeId: node.id, node: node.title, status: 'active' });
+    if (this.traceRing.length > 1000) this.traceRing.splice(0, this.traceRing.length - 1000);
+    this.liveNodeKeys = next; this.schedule(); }
+  addTraceEntries(entries) {
+    for (const entry of entries || []) {
+      this.traceRing.push({ ...entry, nodeId: entry.tracepointId, node: entry.node || entry.tracepointId });
+      if (entry.tracepointId) this.traceNodeKeys.add(entry.tracepointId);
+      for (const [pinId, value] of Object.entries(entry.watchedValues || {})) this.watchedValues.set(pinId, value);
+    }
+    if (this.traceRing.length > 1000) this.traceRing.splice(0, this.traceRing.length - 1000);
+    if (this.traceNodeKeys.size > 100) this.traceNodeKeys = new Set(this.traceRing.slice(-100).map(value => value.nodeId));
+    this.schedule();
+  }
   setDiagnosticPaths(paths) { this.diagnosticPaths = new Set(paths || []); this.schedule(); }
 
   schedule() {
@@ -139,39 +179,59 @@ export class GraphCanvas {
     this.renderFrame = requestAnimationFrame(() => { this.renderFrame = null; this.render(); });
   }
 
+  scheduleViewportRender() {
+    const desired = this.visibleNodeIds();
+    if (desired.size !== this.renderedNodeIds.size
+        || [...desired].some(id => !this.renderedNodeIds.has(id))) this.schedule();
+  }
+
+  scheduleWires() {
+    if (this.wireFrame) return;
+    this.wireFrame = requestAnimationFrame(() => {
+      this.wireFrame = null;
+      if (this.projection && this.renderedProjection === this.projection) this.renderWires(this.renderedNodeIds);
+    });
+  }
+
   render() {
     if (!this.projection) { this.clear(); return; }
+    if (this.wireFrame) cancelAnimationFrame(this.wireFrame);
+    this.wireFrame = null;
+    this.applyViewport();
     const focusedNodeId = document.activeElement?.closest?.('.graph-node-card')?.dataset.nodeId;
     const visible = this.visibleNodeIds();
     const fragment = document.createDocumentFragment();
     for (const group of this.groups) fragment.append(this.groupElement(group));
     for (const comment of this.comments) fragment.append(this.commentElement(comment));
     for (const node of this.projection.nodes) if (visible.has(node.id)) fragment.append(this.nodeElement(node));
+    this.nodeResizeObserver.disconnect();
     this.nodesLayer.replaceChildren(fragment);
+    this.renderedNodeIds = visible;
+    this.renderedProjection = this.projection;
+    for (const node of this.nodesLayer.querySelectorAll('.graph-node-card')) this.nodeResizeObserver.observe(node);
     if (focusedNodeId) this.nodesLayer.querySelector('[data-node-id="' + CSS.escape(focusedNodeId) + '"]')?.focus();
     this.renderWires(visible);
-    this.applyViewport();
+    this.scheduleWires();
   }
 
   visibleNodeIds() {
     if (!this.projection) return new Set();
+    if (this.projection.nodes.length <= VIRTUALIZATION_THRESHOLD)
+      return new Set(this.projection.nodes.map(node => node.id));
     const margin = 500 / this.viewport.zoom;
     const left = -this.viewport.x / this.viewport.zoom - margin;
     const top = -this.viewport.y / this.viewport.zoom - margin;
     const right = (this.canvas.clientWidth - this.viewport.x) / this.viewport.zoom + margin;
     const bottom = (this.canvas.clientHeight - this.viewport.y) / this.viewport.zoom + margin;
     const visible = new Set([...this.selection, ...this.bookmarks]);
+    const focusedNode = document.activeElement?.closest?.('.graph-node-card')?.dataset.nodeId;
+    if (focusedNode) visible.add(focusedNode);
     for (const node of this.projection.nodes) {
       const point = this.positions[node.id];
       if (point && point.x + NODE_WIDTH >= left && point.x <= right && point.y + NODE_HEIGHT >= top && point.y <= bottom)
         visible.add(node.id);
     }
     return visible;
-  }
-
-  scheduleMinimap() {
-    if (this.minimapFrame) return;
-    this.minimapFrame = requestAnimationFrame(() => { this.minimapFrame = null; this.renderMinimap(); });
   }
 
   nodeElement(node) {
@@ -184,7 +244,7 @@ export class GraphCanvas {
     if (this.bookmarks.has(node.id)) card.classList.add('bookmarked');
     if (this.collapsed.has(node.id)) card.classList.add('collapsed');
     if (this.colors[node.id]) card.style.setProperty('--node-label-color', this.colors[node.id]);
-    const live = this.liveNodeKeys.has(node.title) || this.liveNodeKeys.has(node.yamlPath);
+    const live = this.liveNodeKeys.has(node.title) || this.liveNodeKeys.has(node.yamlPath) || this.traceNodeKeys.has(node.id);
     if (live) card.classList.add('live-active');
     const nodeIssues = (this.projection.diagnostics || []).filter(issue => issue.nodeId === node.id
       || issue.yamlPath && (issue.yamlPath === node.yamlPath || issue.yamlPath.startsWith(node.yamlPath + '/')));
@@ -192,6 +252,8 @@ export class GraphCanvas {
         || [...this.diagnosticPaths].some(path => path && (path === node.yamlPath || path.startsWith(node.yamlPath + '/'))))
       card.classList.add('has-diagnostic');
     card.dataset.nodeId = node.id; card.dataset.yamlPath = node.yamlPath;
+    const longest = Math.max(String(presentation.title || '').length, ...(node.pins || []).map(pin => String(pin.label || '').length));
+    card.style.width = `${Math.max(184, Math.min(340, 176 + longest * 4.8))}px`;
     card.style.transform = 'translate(' + position.x + 'px,' + position.y + 'px)';
     card.tabIndex = 0; card.setAttribute('role', 'group');
     card.setAttribute('aria-label', [node.title, node.kind,
@@ -204,7 +266,7 @@ export class GraphCanvas {
     const titles = document.createElement('span'); titles.className = 'graph-node-title';
     const title = document.createElement('strong'); title.textContent = presentation.title;
     const subtitle = document.createElement('small'); subtitle.textContent = presentation.subtitle;
-    titles.append(title, subtitle);
+    titles.append(title); if (presentation.subtitle) titles.append(subtitle);
     const badges = document.createElement('span'); badges.className = 'graph-badges';
     const badgeValues = new Set(node.badges || []);
     for (const badge of presentation.badges) badgeValues.add(badge);
@@ -214,6 +276,7 @@ export class GraphCanvas {
     if (node.extensionOwner) badgeValues.add(node.extensionOwner);
     if (this.options.isDirtyNode?.(node)) badgeValues.add('dirty');
     if (this.bookmarks.has(node.id)) badgeValues.add('bookmark');
+    if (this.tracepoints.has(node.id)) badgeValues.add('tracepoint');
     for (const value of badgeValues) { const badge = document.createElement('span'); badge.className = 'graph-badge'; badge.textContent = value; badges.append(badge); }
     const actions = document.createElement('span'); actions.className = 'graph-card-actions';
     const actionTrigger=document.createElement('button');actionTrigger.type='button';actionTrigger.className='graph-card-menu-trigger';actionTrigger.textContent='⋯';actionTrigger.setAttribute('aria-label',`Actions for ${node.title}`);actionTrigger.setAttribute('aria-haspopup','menu');actionTrigger.setAttribute('aria-expanded','false');
@@ -222,15 +285,21 @@ export class GraphCanvas {
     const action = (label, type) => {
       const button = document.createElement('button'); button.type = 'button'; button.textContent = label;button.setAttribute('role','menuitem');
       button.addEventListener('pointerdown', event => event.stopPropagation());
-      button.addEventListener('click', event => { event.stopPropagation();actionMenu.hidden=true;actionTrigger.setAttribute('aria-expanded','false'); this.options.onNodeAction?.({ type, node }); });
+      button.addEventListener('click', event => { event.stopPropagation();actionMenu.hidden=true;actionTrigger.setAttribute('aria-expanded','false');
+        if (type === 'TOGGLE_TRACEPOINT') this.toggleTracepoint(node.id); else this.options.onNodeAction?.({ type, node }); });
       actionMenu.append(button);
     };
     if (node.kind === 'dialogue-entry' && !(node.badges || []).includes('start')) action('Set as start', 'SET_DIALOGUE_START');
     if (node.kind === 'quest-phase') action('Open objectives', 'OPEN_QUEST_OBJECTIVES');
-    if (node.kind === 'script-input' || node.kind === 'script-output') action('Add parameter…', 'ADD_SCRIPT_PARAMETER');
+    if (this.projection?.resourceKind === 'script' && (node.kind === 'script-input' || node.kind === 'script-output'))
+      action(`Add ${node.kind === 'script-input' ? 'input' : 'output'} parameter…`, 'ADD_SCRIPT_PARAMETER');
+    if (node.subtitle === 'get-variable' || node.subtitle === 'set-variable') {
+      action('Rename variable…', 'RENAME_VARIABLE'); action('Change variable type…', 'CHANGE_VARIABLE_TYPE');
+      action('Delete variable…', 'DELETE_VARIABLE');
+    }
     if (node.kind === 'resource-reference') action('Open resource', 'OPEN_REFERENCED_RESOURCE');
     if (node.kind === 'npc-anchor') action('Paste coordinates', 'PASTE_ANCHOR_COORDINATES');
-    if (node.kind === 'npc') {
+    if (node.kind === 'npc-configuration') {
       action('Create and assign player behavior', 'CREATE_ASSIGN_PLAYER_BEHAVIOR');
       action('Create and assign shared behavior', 'CREATE_ASSIGN_SHARED_BEHAVIOR');
       action('Create and assign dialogue', 'CREATE_ASSIGN_DIALOGUE');
@@ -240,12 +309,16 @@ export class GraphCanvas {
     if (node.kind === 'reusable-script') action('Show callers', 'SHOW_SCRIPT_CALLERS');
     if ((node.kind.startsWith('script-') || node.kind === 'extension-command') && node.yamlPath)
       action('Extract to reusable script', 'EXTRACT_TO_SCRIPT');
+    if ((node.kind.startsWith('script-') || node.kind.startsWith('flow-')) && node.yamlPath
+        && !['script-input', 'script-output'].includes(node.kind)) action('Replace node…', 'REPLACE_NODE');
+    if (node.yamlPath?.includes('/nodes/') && !(node.badges || []).includes('non-deletable')) action('Rename node…', 'RENAME_NODE');
     action(this.bookmarks.has(node.id) ? 'Unbookmark' : 'Bookmark', 'TOGGLE_BOOKMARK');
+    action(this.tracepoints.has(node.id) ? 'Remove tracepoint' : 'Add tracepoint', 'TOGGLE_TRACEPOINT');
     action(this.collapsed.has(node.id) ? 'Expand' : 'Collapse', 'TOGGLE_COLLAPSE');
     const unresolved = (this.projection.diagnostics || []).find(issue => issue.nodeId === node.id && issue.relatedResourceKind)
       || (node.badges || []).includes('unresolved');
     if (node.kind === 'missing-reference' || unresolved) action('Create missing', 'CREATE_MISSING_RESOURCE');
-    const resourceRoot = node.kind === 'npc' || node.kind === 'quest' || node.kind === 'reusable-script'
+    const resourceRoot = (node.badges || []).includes('non-deletable') || node.kind === 'npc-configuration' || node.kind === 'quest' || node.kind === 'reusable-script'
       || node.kind === 'script-input' || node.kind === 'script-output'
       || this.projection.resourceKind === 'behavior' && node.yamlPath === `${this.projection.rootYamlPath}/root`.replace(/^\/\//, '/');
     if (this.projection.editable && node.yamlPath && !node.custom && !resourceRoot) {
@@ -265,7 +338,7 @@ export class GraphCanvas {
       }
     }
     header.append(titles, badges, actions);
-    if(node.kind==='script-input'||node.kind==='script-output'){const add=document.createElement('button');add.type='button';add.className='script-parameter-add';add.textContent='+';add.setAttribute('aria-label',`Add ${node.kind==='script-input'?'input':'output'} parameter`);add.addEventListener('pointerdown',event=>event.stopPropagation());add.addEventListener('click',event=>{event.stopPropagation();this.options.onNodeAction?.({type:'ADD_SCRIPT_PARAMETER',node});});header.append(add);}
+    if(this.projection?.resourceKind==='script'&&(node.kind==='script-input'||node.kind==='script-output')){const add=document.createElement('button');add.type='button';add.className='script-parameter-add';add.textContent='+';add.setAttribute('aria-label',`Add ${node.kind==='script-input'?'input':'output'} parameter`);add.addEventListener('pointerdown',event=>event.stopPropagation());add.addEventListener('click',event=>{event.stopPropagation();this.options.onNodeAction?.({type:'ADD_SCRIPT_PARAMETER',node});});header.append(add);}
     header.addEventListener('pointerdown', event => this.startNodeDrag(event, node.id));
     const fields = document.createElement('ul'); fields.className = 'graph-node-fields';
     for (const field of (node.fields || []).slice(0, 4)) {
@@ -277,17 +350,21 @@ export class GraphCanvas {
     const inputs = document.createElement('div'); inputs.className = 'graph-pin-column inputs';
     const outputs = document.createElement('div'); outputs.className = 'graph-pin-column outputs';
     for (const pin of node.pins || []) {
-      const column = pin.direction === 'input' ? inputs : outputs; column.append(this.pinElement(pin));
-      if (pin.direction === 'input' && pin.channel === 'DATA' && !this.incoming(pin.id).length)
+      const input = String(pin.direction).toUpperCase() === 'INPUT';
+      const column = input ? inputs : outputs; column.append(this.pinElement(pin));
+      if (input && pin.channel === 'DATA' && pin.literal?.editable !== false && !this.incoming(pin.id).length)
         column.append(this.inlineDefaultElement(pin));
     }
     pins.append(inputs, outputs);
-    card.append(header, fields, pins);
+    card.append(header); if (fields.children.length) card.append(fields); card.append(pins);
     card.addEventListener('click', event => {
-      if (event.target.closest('.graph-pin')) return;
+      if (event.target.closest('button, input, select, textarea, [contenteditable="true"]')) return;
       this.select(node.id, event.ctrlKey || event.metaKey || event.shiftKey);
     });
-    card.addEventListener('dblclick', () => this.options.onNavigateSource(node));
+    card.addEventListener('dblclick', event => {
+      if (!event.target.closest('button, input, select, textarea, [contenteditable="true"]'))
+        this.options.onNavigateSource(node);
+    });
     card.addEventListener('pointerdown', () => { card.dataset.pointerFocus = 'true'; }, { capture: true });
     card.addEventListener('pointerup', () => { setTimeout(() => { delete card.dataset.pointerFocus; }, 0); }, { capture: true });
     card.addEventListener('pointercancel', () => { delete card.dataset.pointerFocus; }, { capture: true });
@@ -320,15 +397,25 @@ export class GraphCanvas {
     const presentation = this.renderers.describePin(pin);
     button.className = presentation.className; button.dataset.pinId = pin.id; button.dataset.type = pin.semanticType;
     button.dataset.channel = pin.channel || 'DATA'; button.dataset.valueType = pin.valueType || pin.semanticType;
-    button.textContent = presentation.text; button.title = presentation.title;
+    const watched = this.watchedValues.get(pin.id);
+    const ring = document.createElement('span'); ring.className = 'graph-pin-ring'; ring.setAttribute('aria-hidden', 'true');
+    const label = document.createElement('span'); label.className = 'graph-pin-label';
+    label.textContent = watched == null ? presentation.text : `${presentation.text} = ${watched}`;
+    button.append(ring, label);
+    button.title = watched == null ? presentation.title : `${presentation.title}\nLast watched value: ${watched}`;
     const connectionCount = (this.projection?.edges || []).filter(edge =>
       edge.sourcePinId === pin.id || edge.targetPinId === pin.id).length;
     button.classList.toggle('wired', connectionCount > 0);
     button.setAttribute('aria-label', `${presentation.ariaLabel}, ${connectionCount
       ? `${connectionCount} current connection${connectionCount === 1 ? '' : 's'}` : 'not connected'}`);
     button.addEventListener('pointerdown', event => this.startPinConnection(event, pin, button));
+    button.addEventListener('mouseenter', () => this.highlightPinWires(pin.id, true));
+    button.addEventListener('mouseleave', () => this.highlightPinWires(pin.id, false));
+    button.addEventListener('contextmenu', event => { event.preventDefault(); event.stopPropagation(); this.openPinMenu(pin, event.clientX, event.clientY, button); });
     button.addEventListener('click', event => {
       event.stopPropagation();
+      if (event.altKey) { const links = (this.projection?.edges || []).filter(edge => edge.sourcePinId === pin.id || edge.targetPinId === pin.id);
+        if (links.length) this.options.onBreakLinks?.(links, pin); return; }
       if (button.dataset.dragged === 'true') { delete button.dataset.dragged; return; }
       this.activatePin(pin, button);
     });
@@ -350,9 +437,58 @@ export class GraphCanvas {
       if (pin.resourceKind) { editor.setAttribute('role', 'combobox'); editor.placeholder = `Select ${pin.resourceKind}`; }
       editor.value = pin.literal?.defaultValue ?? pin.literal?.value ?? ''; }
     const commit = () => this.options.onInlineDefault?.(pin, editor.type === 'checkbox' ? String(editor.checked) : editor.value);
-    editor.addEventListener('change', commit); editor.addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); commit(); } });
-    editor.addEventListener('pointerdown', event => event.stopPropagation()); return editor;
+    editor.addEventListener('change', commit); editor.addEventListener('keydown', event => {
+      event.stopPropagation(); if (event.key === 'Enter') { event.preventDefault(); commit(); }
+    });
+    for (const eventName of ['pointerdown', 'click', 'dblclick'])
+      editor.addEventListener(eventName, event => event.stopPropagation());
+    return editor;
   }
+
+  highlightPinWires(pinId, enabled) {
+    for (const edge of this.projection?.edges || []) if (edge.sourcePinId === pinId || edge.targetPinId === pinId)
+      this.wires.querySelectorAll(`[data-edge-id="${CSS.escape(edge.id)}"]`).forEach(path => path.classList.toggle('highlighted', enabled));
+  }
+
+  contextMenu(x, y, actions) {
+    document.querySelector('#graph-context-menu')?.remove();
+    const menu = document.createElement('div'); menu.id = 'graph-context-menu'; menu.className = 'resource-tab-menu';
+    menu.setAttribute('role', 'menu'); menu.style.left = `${x}px`; menu.style.top = `${y}px`;
+    for (const [label, run, disabled] of actions) { const button = document.createElement('button'); button.type = 'button';
+      button.setAttribute('role', 'menuitem'); button.textContent = label; button.disabled = Boolean(disabled);
+      button.addEventListener('click', () => { menu.remove(); run(); }); menu.append(button); }
+    document.body.append(menu); menu.querySelector('button:not(:disabled)')?.focus();
+    setTimeout(() => document.addEventListener('pointerdown', event => { if (!menu.contains(event.target)) menu.remove(); }, { once: true }), 0);
+  }
+
+  openPinMenu(pin, x, y) {
+    const links = (this.projection?.edges || []).filter(edge => edge.sourcePinId === pin.id || edge.targetPinId === pin.id);
+    this.contextMenu(x, y, [
+      [links.length === 1 ? 'Break Link' : 'Break All Links', () => this.options.onBreakLinks?.(links, pin), !links.length],
+      ['Move All Links…', () => this.options.onMoveLinks?.(pin), !links.length],
+      [this.watchedPins.has(pin.id) ? 'Stop Watching Pin' : 'Watch Pin', () => this.toggleWatch(pin.id), false],
+      ['Promote to Variable', () => this.options.onPromotePin?.(pin), pin.channel !== 'DATA'],
+      ['Find Connected Nodes', () => { const owners = new Set(links.flatMap(edge => [this.pin(edge.sourcePinId)?.nodeId, this.pin(edge.targetPinId)?.nodeId]).filter(Boolean));
+        this.selection = new GraphSelection([...owners]); this.schedule(); }, !links.length]
+    ]);
+  }
+
+  openWireMenu(edge, x, y) {
+    this.contextMenu(x, y, [
+      ['Disconnect', () => this.options.onDisconnect?.(edge), false],
+      ['Straighten', () => { if (!this.reroutes[edge.id]) return; const before = this.snapshot(); delete this.reroutes[edge.id]; this.schedule(); this.layoutCommand(before); }, !this.reroutes[edge.id]?.length],
+      ['Add Reroute', () => { const source = this.pinGraphCenter(edge.sourcePinId), target = this.pinGraphCenter(edge.targetPinId);
+        if (source && target) this.addReroute(edge.id, { x: (source.x + target.x) / 2, y: (source.y + target.y) / 2 }); }, false],
+      ['Insert Node', () => this.options.onInsertWire?.(edge, this.pin(edge.sourcePinId), { clientX: x, clientY: y }), false]
+    ]);
+  }
+
+  toggleTracepoint(nodeId) { const before = this.snapshot(); this.tracepoints.has(nodeId)
+    ? this.tracepoints.delete(nodeId) : this.tracepoints.add(nodeId); this.schedule(); this.layoutCommand(before);
+    this.options.onTraceSelectionChange?.([...this.tracepoints], [...this.watchedPins]); }
+  toggleWatch(pinId) { const before = this.snapshot(); this.watchedPins.has(pinId)
+    ? this.watchedPins.delete(pinId) : this.watchedPins.add(pinId); this.schedule(); this.layoutCommand(before);
+    this.options.onTraceSelectionChange?.([...this.tracepoints], [...this.watchedPins]); }
 
   pin(pinId) {
     for (const node of this.projection?.nodes || []) {
@@ -396,14 +532,14 @@ export class GraphCanvas {
     if (!this.projection?.editable || !this.projection.capabilities?.includes('CONNECT')) return;
     if (!this.pendingPin) {
       let source = pin, reconnect = null;
-      if (pin.direction === 'input') {
+      if (String(pin.direction).toUpperCase() === 'INPUT') {
         const incoming = this.incoming(pin.id);
         if (incoming.length !== 1) {
           this.options.onConnectionError?.('An input can start reconnect only when it has exactly one existing connection.'); return;
         }
         reconnect = incoming[0]; source = this.pin(reconnect.sourcePinId);
       }
-      if (!source || source.direction !== 'output') return;
+      if (!source || String(source.direction).toUpperCase() !== 'OUTPUT') return;
       this.pendingPin = source; this.pendingReconnectEdge = reconnect;
       button.setAttribute('aria-pressed', 'true');
       this.options.onConnectionPending?.(source);
@@ -417,14 +553,19 @@ export class GraphCanvas {
   }
 
   startPinConnection(event, pin, button) {
+    if (event.altKey) return;
     if (event.pointerType !== 'touch' && event.button !== 0 || !this.projection?.editable) return;
     let source = pin, reconnect = null;
-    if (pin.direction === 'input') {
+    if (String(pin.direction).toUpperCase() === 'INPUT') {
       const incoming = this.incoming(pin.id);
       if (incoming.length !== 1) return;
       reconnect = incoming[0]; source = this.pin(reconnect.sourcePinId);
     }
-    if (!source || source.direction !== 'output') return;
+    if (!source || String(source.direction).toUpperCase() !== 'OUTPUT') return;
+    if ((event.ctrlKey || event.metaKey) && String(pin.direction).toUpperCase() === 'OUTPUT') {
+      const outgoing = (this.projection?.edges || []).filter(edge => edge.sourcePinId === pin.id);
+      if (outgoing.length === 1) reconnect = outgoing[0];
+    }
     event.stopPropagation();
     const startX = event.clientX, startY = event.clientY;
     button.setPointerCapture(event.pointerId);
@@ -452,7 +593,17 @@ export class GraphCanvas {
 
   connectPins(source, target, reconnectEdge = null) {
     const check = this.compatible(source, target);
-    if (!check.valid) { this.options.onConnectionError?.(check.reason); return; }
+    if (!check.valid) {
+      const safeAutocast = source.channel === 'DATA' && target.channel === 'DATA'
+        && (source.valueType === 'integer' && target.valueType === 'number'
+          || source.valueType === 'string' && target.valueType === 'text');
+      if (safeAutocast && !reconnectEdge && confirm(`Insert a visible ${source.valueType} → ${target.valueType} converter?`)) {
+        this.options.onConnect?.({ source, target, operations: [{ type: 'CONNECT_WITH_AUTOCAST',
+          sourcePinId: source.id, targetPinId: target.id,
+          key: `wire-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}` }] }); return;
+      }
+      this.options.onConnectionError?.(check.reason); return;
+    }
     const operations = [];
     if (reconnectEdge) {
       operations.push({ type: 'RECONNECT', edgeId: reconnectEdge.id,
@@ -488,10 +639,8 @@ export class GraphCanvas {
       this.previewPath.setAttribute('class', 'graph-wire preview');
       this.wires.append(this.previewPath);
     }
-    const bounds = this.canvas.getBoundingClientRect();
     const x1 = start.x, y1 = start.y;
-    const x2 = (clientX - bounds.left - this.viewport.x) / this.viewport.zoom;
-    const y2 = (clientY - bounds.top - this.viewport.y) / this.viewport.zoom;
+    const end = this.screenToGraph(clientX, clientY), x2 = end.x, y2 = end.y;
     const bend = Math.max(70, Math.abs(x2 - x1) * .45);
     this.previewPath.setAttribute('d', `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`);
   }
@@ -503,9 +652,24 @@ export class GraphCanvas {
   }
 
   pinGraphCenters() {
-    const result=new Map(),canvas=this.canvas.getBoundingClientRect();
-    for(const element of this.nodesLayer?.querySelectorAll('[data-pin-id]')||[]){const pin=element.getBoundingClientRect();result.set(element.dataset.pinId,{x:(pin.left+pin.width/2-canvas.left-this.viewport.x)/this.viewport.zoom,y:(pin.top+pin.height/2-canvas.top-this.viewport.y)/this.viewport.zoom});}
+    const result = new Map();
+    for (const element of this.nodesLayer?.querySelectorAll('[data-pin-id]') || []) {
+      const ring = element.querySelector('.graph-pin-ring')?.getBoundingClientRect();
+      if (!ring) continue;
+      result.set(element.dataset.pinId, this.screenToGraph(ring.left + ring.width / 2, ring.top + ring.height / 2));
+    }
     return result;
+  }
+
+  screenToGraph(clientX, clientY) {
+    const matrix = this.wires?.getScreenCTM?.();
+    if (matrix) {
+      const point = new DOMPoint(clientX, clientY).matrixTransform(matrix.inverse());
+      return { x: point.x, y: point.y };
+    }
+    const bounds = this.canvas.getBoundingClientRect();
+    return { x: (clientX - bounds.left - this.viewport.x) / this.viewport.zoom,
+      y: (clientY - bounds.top - this.viewport.y) / this.viewport.zoom };
   }
 
   cancelPinConnection() {
@@ -533,13 +697,19 @@ export class GraphCanvas {
       if (this.focusedNodes && (!this.focusedNodes.has(sourceId) || !this.focusedNodes.has(targetId)))
         path.classList.add('graph-dimmed');
       path.dataset.type = edge.semanticType; path.dataset.edgeId = edge.id;
+      if (edge.semanticType === 'execution' && (this.liveNodeKeys.has(this.projection.nodes.find(node => node.id === sourceId)?.title)
+          || this.liveNodeKeys.has(this.projection.nodes.find(node => node.id === targetId)?.title)
+          || this.traceNodeKeys.has(sourceId) || this.traceNodeKeys.has(targetId))) path.classList.add('active-execution');
       const title = document.createElementNS(SVG, 'title');
       title.textContent = edge.label + ', ' + edge.semanticType + (edge.resolved ? '' : ', unresolved');
       path.append(title); fragment.append(path);
       if (this.projection.editable && this.projection.capabilities?.includes('DISCONNECT')) {
         const hit = path.cloneNode(false);
         hit.setAttribute('class', 'graph-wire-hit');
-        hit.addEventListener('click', () => this.options.onDisconnect?.(edge));
+        hit.addEventListener('click', event => { if (event.altKey) this.options.onDisconnect?.(edge); });
+        hit.addEventListener('dblclick', event => { event.preventDefault(); event.stopPropagation();
+          this.addReroute(edge.id, this.screenToGraph(event.clientX, event.clientY)); });
+        hit.addEventListener('contextmenu', event => { event.preventDefault(); this.openWireMenu(edge, event.clientX, event.clientY); });
         fragment.append(hit);
         const control = document.createElementNS(SVG, 'circle');
         control.setAttribute('class', 'graph-wire-control'); control.setAttribute('cx', String((x1 + x2) / 2));
@@ -560,7 +730,8 @@ export class GraphCanvas {
         insert.setAttribute('cy', String((y1 + y2) / 2 - 22)); insert.setAttribute('r', '7');
         insert.setAttribute('tabindex', '0'); insert.setAttribute('role', 'button');
         insert.setAttribute('aria-label', `Insert node on ${edge.label || edge.semanticType} connection`);
-        const open = () => this.options.onInsertWire?.(edge, this.pin(edge.sourcePinId));
+        const open = () => this.options.onInsertWire?.(edge, this.pin(edge.sourcePinId),
+          { graphPosition: { x: (x1 + x2) / 2, y: (y1 + y2) / 2 } });
         insert.addEventListener('click', open); insert.addEventListener('keydown', event => {
           if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); }
         }); fragment.append(insert);
@@ -575,16 +746,6 @@ export class GraphCanvas {
           if (event.key === 'Delete' || event.key === 'Backspace') { event.preventDefault(); this.removeReroute(edge.id, routeIndex); }
         }); fragment.append(control);
       }
-      const addReroute = document.createElementNS(SVG, 'circle');
-      addReroute.setAttribute('class', 'graph-reroute-add'); addReroute.setAttribute('cx', String((x1 + x2) / 2));
-      // Keep the add affordance below wire labels and the canvas' adjacent toolbar in every engine.
-      addReroute.setAttribute('cy', String((y1 + y2) / 2 + 52)); addReroute.setAttribute('r', '7');
-      addReroute.setAttribute('tabindex', '0'); addReroute.setAttribute('role', 'button');
-      addReroute.setAttribute('aria-label', `Add layout-only reroute to ${edge.label || edge.semanticType}`);
-      const add = () => this.addReroute(edge.id, { x: (x1 + x2) / 2, y: (y1 + y2) / 2 });
-      addReroute.addEventListener('click', add); addReroute.addEventListener('keydown', event => {
-        if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); add(); }
-      }); fragment.append(addReroute);
       if (this.projection.resourceKind === 'relationship') {
         const addOpenControl = (direction, nodeId, offset) => {
           const control = document.createElementNS(SVG, 'circle');
@@ -599,38 +760,9 @@ export class GraphCanvas {
         };
         addOpenControl('source', sourceId, -12); addOpenControl('target', targetId, 12);
       }
-      if (edge.label) {
-        const label = document.createElementNS(SVG, 'text'); label.setAttribute('class', 'wire-label');
-        label.setAttribute('x', String((x1 + x2) / 2)); label.setAttribute('y', String((y1 + y2) / 2 - 7));
-        label.setAttribute('text-anchor', 'middle'); label.textContent = edge.label; fragment.append(label);
-      }
     }
-    this.wires.setAttribute('viewBox', '-4000 -4000 12000 12000');
+    this.wires.setAttribute('viewBox', '0 0 1 1');
     this.wires.replaceChildren(fragment);
-  }
-
-  renderMinimap() {
-    renderGraphMinimap({ element: this.minimap, positions: this.positions, projection: this.projection,
-      viewport: this.viewport, canvasWidth: this.canvas.clientWidth, canvasHeight: this.canvas.clientHeight,
-      selection: this.selection, liveNodeKeys: this.liveNodeKeys, diagnosticPaths: this.diagnosticPaths,
-      nodeWidth: NODE_WIDTH, nodeHeight: NODE_HEIGHT });
-  }
-
-  panFromMinimap(event) {
-    event.preventDefault(); this.minimap.setPointerCapture(event.pointerId);
-    const move = current => {
-      const bounds = this.minimap.getBoundingClientRect(), box = this.minimap.viewBox.baseVal;
-      if (!bounds.width || !bounds.height) return;
-      const worldX = box.x + (current.clientX - bounds.left) / bounds.width * box.width;
-      const worldY = box.y + (current.clientY - bounds.top) / bounds.height * box.height;
-      this.viewport.x = this.canvas.clientWidth / 2 - worldX * this.viewport.zoom;
-      this.viewport.y = this.canvas.clientHeight / 2 - worldY * this.viewport.zoom;
-      this.applyViewport(); this.schedule();
-    };
-    const end = () => { this.minimap.removeEventListener('pointermove', move); this.changed(); };
-    move(event); this.minimap.addEventListener('pointermove', move);
-    this.minimap.addEventListener('pointerup', end, { once: true });
-    this.minimap.addEventListener('pointercancel', end, { once: true });
   }
 
   routePath(points) {
@@ -676,7 +808,6 @@ export class GraphCanvas {
       if (this.selection.has(card.dataset.nodeId)) card.setAttribute('aria-current', 'true');
       else card.removeAttribute('aria-current');
     });
-    this.scheduleMinimap();
     this.options.onSelection(this.projection.nodes.filter(node => this.selection.has(node.id)));
   }
 
@@ -695,12 +826,59 @@ export class GraphCanvas {
     requestAnimationFrame(() => this.nodesLayer.querySelector('[data-node-id="' + CSS.escape(id) + '"]')?.focus());
   }
 
+  findCurrentGraph() {
+    if (!this.projection) return;
+    const query=prompt('Find node or field in the current graph','')?.trim().toLowerCase();if(!query)return;
+    const matches=this.projection.nodes.filter(node=>[node.title,node.subtitle,node.kind,node.yamlPath,
+      ...(node.fields||[]).flatMap(field=>[field.label,field.value]),
+      ...(node.pins||[]).flatMap(pin=>[pin.label,pin.valueType,pin.literal?.value])].some(value=>String(value||'').toLowerCase().includes(query)));
+    if(!matches.length){const comment=this.comments.find(value=>String(value.text||'').toLowerCase().includes(query));if(comment){this.selection.clear();this.viewport.x=this.canvas.clientWidth/2-comment.x*this.viewport.zoom;this.viewport.y=this.canvas.clientHeight/2-comment.y*this.viewport.zoom;this.applyViewport();this.schedule();this.options.onSelection([]);return;}this.options.onConnectionError?.(`No current-graph nodes, pins, comments, variables, or values match “${query}”.`);return;}
+    this.selection=new GraphSelection(matches.map(node=>node.id));this.zoomToFitSelection(matches.map(node=>node.id));
+    this.options.onSelection(matches);requestAnimationFrame(()=>this.nodesLayer.querySelector(`[data-node-id="${CSS.escape(matches[0].id)}"]`)?.focus());
+  }
+
+  bookmarkViewport() {
+    const name=prompt('Name this viewport bookmark',`View ${this.viewportBookmarks.length+1}`)?.trim();if(!name)return;
+    const context=this.options.viewportContext?.()||{};
+    const bookmark={name:name.slice(0,80),viewport:{...this.viewport},resourceIdentity:context.resourceIdentity||this.projection?.resourceIdentity,
+      nestedGraph:context.nestedGraph?structuredClone(context.nestedGraph):null};
+    const existing=this.viewportBookmarks.find(value=>value.name.toLowerCase()===name.toLowerCase());
+    if(existing)Object.assign(existing,bookmark);else if(this.viewportBookmarks.length<50)this.viewportBookmarks.push(bookmark);
+    const global=this.globalViewportBookmarks().filter(value=>!(value.name.toLowerCase()===bookmark.name.toLowerCase()
+      && value.resourceIdentity===bookmark.resourceIdentity));global.unshift(bookmark);
+    try{localStorage.setItem(this.viewportBookmarkStorageKey(),JSON.stringify(global.slice(0,100)));}catch{}
+    this.changed();
+  }
+
+  quickJump() {
+    const bookmarks=this.globalViewportBookmarks();
+    if(!bookmarks.length){this.options.onConnectionError?.('This project has no named viewport bookmarks.');return;}
+    const choice=prompt(`Quick jump:\n${bookmarks.map((value,index)=>`${index+1}. ${value.name}`).join('\n')}`,'1')?.trim();
+    const target=/^\d+$/.test(choice||'')?bookmarks[Number(choice)-1]
+      :bookmarks.find(value=>value.name.toLowerCase()===choice?.toLowerCase());if(!target)return;
+    if(this.options.onViewportJump)this.options.onViewportJump(target);else this.restoreViewport(target.viewport);
+  }
+
+  normalizeViewportBookmark(value){return{name:String(value.name).slice(0,80),viewport:normalizeViewport(value.viewport),
+    resourceIdentity:value.resourceIdentity||this.projection?.resourceIdentity||null,nestedGraph:value.nestedGraph||null};}
+
+  viewportBookmarkStorageKey(){return this.options.viewportBookmarkKey?.()||'persona:viewport-bookmarks:v1';}
+
+  globalViewportBookmarks(){try{const stored=JSON.parse(localStorage.getItem(this.viewportBookmarkStorageKey())||'[]');
+    const normalized=Array.isArray(stored)?stored.filter(value=>value?.name&&value.viewport).slice(0,100).map(value=>this.normalizeViewportBookmark(value)):[];
+    for(const local of this.viewportBookmarks)if(!normalized.some(value=>value.name===local.name&&value.resourceIdentity===local.resourceIdentity))normalized.push(local);
+    return normalized.slice(0,100);}catch{return this.viewportBookmarks.map(value=>this.normalizeViewportBookmark(value));}}
+
+  restoreViewport(viewport){this.viewport=normalizeViewport(viewport);this.applyViewport();this.schedule();}
+
   pointerDown(event) {
     if (event.target !== this.canvas && event.target !== this.plane && event.target !== this.nodesLayer) return;
-    if (event.shiftKey) { this.startMarquee(event); return; }
+    if (event.button === 0 && !this.spaceHeld) { this.startMarquee(event); return; }
+    if (event.button !== 1 && !this.spaceHeld) return;
+    event.preventDefault();
     const start = { x: event.clientX, y: event.clientY, vx: this.viewport.x, vy: this.viewport.y };
     this.canvas.setPointerCapture(event.pointerId);
-    const move = current => { this.viewport.x = start.vx + current.clientX - start.x; this.viewport.y = start.vy + current.clientY - start.y; this.applyViewport(); this.schedule(); };
+    const move = current => { this.viewport.x = start.vx + current.clientX - start.x; this.viewport.y = start.vy + current.clientY - start.y; this.applyViewport(); this.scheduleViewportRender(); };
     const end = () => { this.canvas.removeEventListener('pointermove', move); this.changed(); };
     this.canvas.addEventListener('pointermove', move);
     this.canvas.addEventListener('pointerup', end, { once: true });
@@ -750,7 +928,7 @@ export class GraphCanvas {
         if (elements.has(id)) elements.get(id).style.transform = `translate(${point.x}px,${point.y}px)`;
       }
       committed = committed || dx !== 0 || dy !== 0;
-      this.scheduleMinimap();
+      this.scheduleWires();
     };
     const end = current => { target.removeEventListener('pointermove', move);
       if (target.hasPointerCapture(current.pointerId)) target.releasePointerCapture(current.pointerId);
@@ -766,20 +944,19 @@ export class GraphCanvas {
     const worldX = (x - this.viewport.x) / this.viewport.zoom, worldY = (y - this.viewport.y) / this.viewport.zoom;
     const next = Math.max(.2, Math.min(2.5, this.viewport.zoom * Math.exp(-event.deltaY * .001)));
     this.viewport.x = x - worldX * next; this.viewport.y = y - worldY * next; this.viewport.zoom = next;
-    this.applyViewport(); this.schedule(); this.changed();
+    this.applyViewport(); this.scheduleViewportRender(); this.changed();
   }
 
   applyViewport() {
     this.plane.style.transform = 'translate(' + this.viewport.x + 'px,' + this.viewport.y + 'px) scale(' + this.viewport.zoom + ')';
     this.zoomOutput.value = Math.round(this.viewport.zoom * 100) + '%';
     this.zoomOutput.textContent = this.zoomOutput.value;
-    this.scheduleMinimap();
   }
 
   zoomToFit() {
     const points = Object.values(this.positions); if (!points.length) return;
     this.viewport = fitViewport(points, this.canvas.clientWidth, this.canvas.clientHeight, NODE_WIDTH, NODE_HEIGHT);
-    this.applyViewport(); this.changed();
+    this.applyViewport(); this.scheduleViewportRender(); this.changed();
   }
 
   autoLayout() {
@@ -901,19 +1078,32 @@ export class GraphCanvas {
   zoomToFitSelection(ids) {
     const points = ids.map(id => this.positions[id]).filter(Boolean); if (!points.length) return;
     this.viewport = fitViewport(points, this.canvas.clientWidth, this.canvas.clientHeight, NODE_WIDTH, NODE_HEIGHT);
-    this.applyViewport(); this.changed();
+    this.applyViewport(); this.scheduleViewportRender(); this.changed();
   }
 
   keydown(event) {
     if (!this.projection) return;
+    if (event.code === 'Space' && !event.ctrlKey && !event.metaKey && !event.altKey) { this.spaceHeld = true; event.preventDefault(); return; }
     if (event.key === 'Escape' && this.focusedNodes) {
       event.preventDefault(); this.focusedNodes = null; this.schedule(); return;
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
       event.preventDefault(); this.options.onCommand?.({ type: 'COPY', nodeIds: [...this.selection] }); return;
     }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'x') {
+      event.preventDefault(); this.options.onCommand?.({ type: 'CUT', nodeIds: [...this.selection] }); return;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'v') {
       event.preventDefault(); this.options.onCommand?.({ type: 'PASTE' }); return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'd') {
+      event.preventDefault(); this.options.onCommand?.({ type: 'DUPLICATE', nodeIds: [...this.selection] }); return;
+    }
+    if (event.key === 'F2' && this.selection.size === 1) {
+      event.preventDefault(); this.options.onCommand?.({ type: 'RENAME', nodeId: [...this.selection][0] }); return;
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'f') {
+      event.preventDefault(); this.findCurrentGraph(); return;
     }
     if (event.key === 'Escape' && this.pendingPin) { event.preventDefault(); this.cancelPinConnection(); return; }
     if ((event.ctrlKey || event.metaKey) && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) {
@@ -929,12 +1119,12 @@ export class GraphCanvas {
       event.preventDefault(); this.selection.size ? this.zoomToFitSelection([...this.selection]) : this.zoomToFit(); return;
     }
     if (!event.ctrlKey && !event.metaKey && !event.altKey && event.key === '0') {
-      event.preventDefault(); this.viewport = normalizeViewport(null); this.applyViewport(); this.changed(); return;
+      event.preventDefault(); this.viewport = normalizeViewport(null); this.applyViewport(); this.scheduleViewportRender(); this.changed(); return;
     }
     if (!event.ctrlKey && !event.metaKey && !event.altKey && ['+', '=', '-'].includes(event.key)) {
       event.preventDefault(); const factor = event.key === '-' ? .9 : 1.1;
       this.viewport.zoom = Math.max(.2, Math.min(2.4, this.viewport.zoom * factor));
-      this.applyViewport(); this.changed(); return;
+      this.applyViewport(); this.scheduleViewportRender(); this.changed(); return;
     }
     if (event.key === 'Delete' || event.key === 'Backspace') {
       event.preventDefault(); this.options.onCommand?.({ type: 'DELETE', nodeIds: [...this.selection] }); return;
@@ -955,7 +1145,8 @@ export class GraphCanvas {
     clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => this.options.onLayoutChange?.({
       positions: this.positions, viewport: this.viewport, comments: this.comments, groups: this.groups,
-      bookmarks: [...this.bookmarks], colors: this.colors, collapsed: [...this.collapsed], reroutes: this.reroutes
+      bookmarks: [...this.bookmarks], colors: this.colors, collapsed: [...this.collapsed], reroutes: this.reroutes,
+      viewportBookmarks: this.viewportBookmarks, tracepoints: [...this.tracepoints], watchedPins: [...this.watchedPins]
     }), 150);
   }
 
@@ -967,6 +1158,7 @@ export class GraphCanvas {
   snapshot() {
     return { positions: structuredClone(this.positions), viewport: { ...this.viewport }, selection: [...this.selection],
       comments: structuredClone(this.comments), groups: structuredClone(this.groups), bookmarks: [...this.bookmarks],
-      colors: { ...this.colors }, collapsed: [...this.collapsed], reroutes: structuredClone(this.reroutes) };
+      colors: { ...this.colors }, collapsed: [...this.collapsed], reroutes: structuredClone(this.reroutes),
+      viewportBookmarks: structuredClone(this.viewportBookmarks), tracepoints: [...this.tracepoints], watchedPins: [...this.watchedPins] };
   }
 }

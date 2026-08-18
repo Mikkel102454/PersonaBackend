@@ -26,6 +26,7 @@ public interface HostedMetadataStore {
     boolean deleteDraft(UUID draftId, UUID sessionId);
     void savePublishRequest(PublishRequest request);
     Optional<PublishRequest> publishRequest(UUID id);
+    Optional<PublishRequest> firstPublishRequest(UUID sessionId, PublishRequest.Status status);
     void saveSubscription(LiveSubscription subscription);
     Optional<LiveSubscription> subscription(UUID id);
     boolean deleteSubscription(UUID id,UUID sessionId);

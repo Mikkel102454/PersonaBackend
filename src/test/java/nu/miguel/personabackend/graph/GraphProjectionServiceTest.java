@@ -42,7 +42,10 @@ class GraphProjectionServiceTest {
     }
 
     @Test void dialogueProjectionIncludesEntriesCommandsTransfersAndAdvisoryDiagnostics() {
-        String yaml = "id: test:talk\nstart: start\nnodes:\n  start:\n    script:\n      - type: say\n        text: \"Hello\"\n      - type: goto\n        node: loop\n  loop:\n    script:\n      - type: choice\n        options:\n          - text: Again\n            script:\n              - type: goto\n                node: start\n  orphan:\n    script:\n      - type: goto\n        node: missing\n";
+        String yaml = "content-version: 2\nid: test:talk\nstart: start\nnodes:\n"
+                + "  start:\n    graph:\n      variables: {}\n      nodes:\n        say: { type: say, text: Hello }\n        go: { type: goto, node: loop }\n      connections:\n        enter: { from: $event.exec, to: say.exec }\n        go: { from: say.success, to: go.exec }\n"
+                + "  loop:\n    graph:\n      variables: {}\n      nodes:\n        again: { type: goto, node: start }\n      connections: { enter: { from: $event.exec, to: again.exec } }\n"
+                + "  orphan:\n    graph:\n      variables: {}\n      nodes:\n        missing: { type: goto, node: missing }\n      connections: { enter: { from: $event.exec, to: missing.exec } }\n";
         EditorGraphProjection result = project("dialogues/talk.yml", "dialogue", "test:talk", "", yaml, List.of());
         assertTrue(result.nodes().stream().anyMatch(node -> node.kind().equals("dialogue-entry")
                 && node.badges().contains("start")));
@@ -53,25 +56,31 @@ class GraphProjectionServiceTest {
         assertTrue(result.edges().stream().anyMatch(EditorGraphProjection.GraphEdge::cyclic));
         assertAllEdgesAddressDeclaredPins(result);
 
-        String implicit = "id: test:implicit\nstart: start\nnodes:\n  start:\n    script:\n      - type: say\n        text: Hi\n";
+        String implicit = "content-version: 2\nid: test:implicit\nstart: start\nnodes:\n  start:\n    graph:\n      variables: {}\n      nodes: { line: { type: say, text: Hi } }\n      connections: { enter: { from: $event.exec, to: line.exec } }\n";
         assertTrue(project("dialogues/implicit.yml", "dialogue", "test:implicit", "", implicit, List.of())
-                .diagnostics().stream().anyMatch(issue -> issue.code().equals("IMPLICIT_DIALOGUE_END")));
+                .nodes().stream().anyMatch(node -> node.kind().equals("script-say")));
     }
 
     @Test void questNpcAndReusableScriptProjectionsExposeTheirNativeGraphModels() {
         String behavior = "id: test:walk\nscope: player\nroot: { id: root, type: wait, duration: 1s }\n";
-        String npc = "id: test:guide\ndisplay-name: Guide\nplayer-behavior: test:walk\npresentation: { pose: STANDING, age: adult }\nanchors:\n  home: { world: world, x: 0, y: 64, z: 0 }\n";
+        String npc = "content-version: 2\nid: test:guide\ndisplay-name: Guide\nplayer-behavior: test:walk\npresentation: { pose: STANDING, age: adult }\ndialogues:\n  - { id: test:first, priority: 10 }\n  - { id: test:second, priority: 5 }\nanchors:\n  home: { world: world, x: 0, y: 64, z: 0 }\n";
         List<ContentFile> project = List.of(file("behaviors/walk.yml", behavior), file("npcs/guide.yml", npc));
         EditorGraphProjection npcGraph = project("npcs/guide.yml", "npc", "test:guide", "", npc, project);
-        assertTrue(npcGraph.nodes().stream().anyMatch(node -> node.kind().equals("npc")));
+        assertTrue(npcGraph.nodes().stream().anyMatch(node -> node.kind().equals("npc-configuration")));
         assertTrue(npcGraph.nodes().stream().anyMatch(node -> node.kind().equals("resource-reference")
                 && !node.badges().contains("unresolved")));
         assertTrue(npcGraph.nodes().stream().anyMatch(node -> node.kind().equals("npc-anchor")));
-        assertTrue(npcGraph.nodes().stream().filter(node -> node.kind().equals("npc"))
-                .flatMap(node -> node.fields().stream()).anyMatch(field -> field.label().equals("pose")));
+        assertEquals(2, npcGraph.nodes().stream().filter(node -> node.kind().equals("dialogue-registration"))
+                .map(EditorGraphProjection.GraphNode::id).distinct().count());
+        assertEquals(5, npcGraph.nodes().stream().filter(node -> node.kind().equals("event")).count());
+        assertEquals(List.of("exec", "player", "npc", "npc-instance", "left-button", "right-button"),
+                npcGraph.nodes().stream().filter(node -> node.kind().equals("event") && node.title().equals("On Click"))
+                        .findFirst().orElseThrow().pins().stream().map(EditorGraphProjection.GraphPin::label).toList());
+        assertTrue(npcGraph.nodes().stream().filter(node -> node.kind().equals("npc-configuration"))
+                .flatMap(node -> node.pins().stream()).anyMatch(pin -> pin.label().equals("Display Name")));
         assertTrue(npcGraph.nodes().stream().noneMatch(node -> node.kind().equals("npc-presentation")));
 
-        String quest = "id: test:quest\ntitle: Quest\nwhen: { type: chance, chance: 1.0 }\nphases:\n  - id: first\n    objectives:\n      - id: wait\n        type: wait\n        duration: 1s\n    on-start:\n      - type: say\n        text: Started\n      - type: start-quest\n        quest: test:quest\n    branches:\n      - when: { type: chance, chance: 1.0 }\n        next-phase: second\n  - id: second\n    objectives:\n      - id: visit\n        type: visit-location\n        location: { world: world, x: 0, y: 64, z: 0 }\n";
+        String quest = "content-version: 2\nid: test:quest\ntitle: Quest\nwhen: { type: chance, chance: 1.0 }\nphases:\n  - id: first\n    objectives:\n      - id: wait\n        type: wait\n        duration: 1s\n    on-start:\n      variables: {}\n      nodes:\n        line: { type: say, text: Started }\n        begin: { type: start-quest, quest: test:quest }\n      connections:\n        enter: { from: $event.exec, to: line.exec }\n        begin: { from: line.success, to: begin.exec }\n    branches:\n      - when: { type: chance, chance: 1.0 }\n        next-phase: second\n  - id: second\n    objectives:\n      - id: visit\n        type: visit-location\n        location: { world: world, x: 0, y: 64, z: 0 }\n";
         EditorGraphProjection questGraph = project("quests/quest.yml", "quest", "test:quest", "", quest, List.of());
         assertEquals(2, questGraph.nodes().stream().filter(node -> node.kind().equals("quest-phase")).count());
         assertTrue(questGraph.nodes().stream().anyMatch(node -> node.kind().equals("quest")
@@ -88,12 +97,11 @@ class GraphProjectionServiceTest {
         assertTrue(questGraph.nodes().stream().anyMatch(node -> node.kind().equals("resource-value")
                 && node.subtitle().equals("quest") && node.title().equals("test:quest")));
 
-        String scripts = "content-version: 2\nscripts:\n  welcome:\n    inputs: {}\n    outputs: {}\n    nodes:\n      say: { type: say, text: Welcome }\n      pause: { type: wait, duration: 1ms }\n    connections:\n      enter: { from: $input.exec, to: say.exec }\n      next: { from: say.success, to: pause.exec }\n      leave: { from: pause.success, to: $output.exec }\n  untouched:\n    inputs: {}\n    outputs: {}\n    nodes: {}\n    connections: {}\n";
-        EditorGraphProjection scriptGraph = project("scripts.yml", "script", "welcome", "/scripts/welcome", scripts, List.of());
+        String scripts = "content-version: 2\nid: welcome\ninputs: {}\noutputs: {}\nvariables: {}\nnodes:\n  say: { type: say, text: Welcome }\n  pause: { type: wait, duration: 1ms }\nconnections:\n  enter: { from: $input.exec, to: say.exec }\n  next: { from: say.success, to: pause.exec }\n  leave: { from: pause.success, to: $output.exec }\n";
+        EditorGraphProjection scriptGraph = project("scripts/welcome.yml", "script", "welcome", "", scripts, List.of());
         assertTrue(scriptGraph.nodes().stream().anyMatch(node -> node.kind().equals("script-input")));
         assertTrue(scriptGraph.nodes().stream().anyMatch(node -> node.kind().equals("script-output")));
         assertTrue(scriptGraph.nodes().stream().anyMatch(node -> node.kind().equals("script-say")));
-        assertTrue(scriptGraph.nodes().stream().noneMatch(node -> node.yamlPath().startsWith("/scripts/untouched")));
         assertAllEdgesAddressDeclaredPins(scriptGraph);
     }
 
@@ -113,19 +121,19 @@ class GraphProjectionServiceTest {
     }
 
     @Test void signedExtensionCommandsExposeNominalInputAndOutputPins() {
-        String yaml = "content-version: 2\nscripts:\n  roll:\n    inputs: {}\n"
-                + "    outputs:\n      score: { type: 'vendor:score', required: true }\n"
-                + "    nodes:\n      dice: { type: 'vendor:roll', limit: 4 }\n"
-                + "    connections:\n      enter: { from: $input.exec, to: dice.exec }\n"
-                + "      result: { from: dice.score, to: $output.score }\n"
-                + "      leave: { from: dice.success, to: $output.exec }\n";
+        String yaml = "content-version: 2\nid: roll\ninputs: {}\n"
+                + "outputs:\n  score: { type: 'vendor:score', required: true }\nvariables: {}\n"
+                + "nodes:\n  dice: { type: 'vendor:roll', limit: 4 }\n"
+                + "connections:\n  enter: { from: $input.exec, to: dice.exec }\n"
+                + "  result: { from: dice.score, to: $output.score }\n"
+                + "  leave: { from: dice.success, to: $output.exec }\n";
         String schemaJson = "{\"x-persona-input-pins\":[{\"name\":\"limit\",\"valueType\":\"integer\",\"required\":false,\"default\":6}],"
                 + "\"x-persona-output-pins\":[{\"name\":\"score\",\"valueType\":\"vendor:score\",\"required\":true}],"
                 + "\"x-persona-value-types\":{\"vendor:score\":{}}}";
         EditorSchemaDocument schema = new EditorSchemaDocument("command", "vendor:roll", "vendor",
                 "1", schemaJson, sha(schemaJson));
-        EditorGraphProjection graph = projections.project(new GraphProjectionRequest("scripts.yml", "script",
-                "roll", "/scripts/roll", yaml, sha(yaml), List.of()), List.of(schema), "catalog-1");
+        EditorGraphProjection graph = projections.project(new GraphProjectionRequest("scripts/roll.yml", "script",
+                "roll", "", yaml, sha(yaml), List.of()), List.of(schema), "catalog-1");
         EditorGraphProjection.GraphNode command = graph.nodes().stream()
                 .filter(node -> node.title().equals("dice")).findFirst().orElseThrow();
         assertTrue(command.pins().stream().anyMatch(pin -> pin.direction().equals("INPUT")
@@ -137,6 +145,30 @@ class GraphProjectionServiceTest {
                 graph.ports().stream().map(pin -> pin.channel() + ":" + pin.direction()).collect(java.util.stream.Collectors.toSet()));
     }
 
+    @Test void playerTargetedCommandsExposeARequiredNonLiteralPlayerInput() {
+        String yaml = "content-version: 2\nid: targeted\n"
+                + "inputs:\n  target: { type: player, required: true }\noutputs: {}\nvariables: {}\n"
+                + "nodes:\n  give: { type: give-item, material: minecraft:stone, amount: 2 }\n"
+                + "connections:\n  enter: { from: $input.exec, to: give.exec }\n"
+                + "  target: { from: $input.target, to: give.player }\n"
+                + "  leave: { from: give.success, to: $output.exec }\n";
+
+        EditorGraphProjection graph = project("scripts/targeted.yml", "script", "targeted", "", yaml, List.of());
+        EditorGraphProjection.GraphNode give = graph.nodes().stream()
+                .filter(node -> node.title().equals("give")).findFirst().orElseThrow();
+        EditorGraphProjection.GraphPin player = give.pins().stream()
+                .filter(pin -> pin.label().equals("player")).findFirst().orElseThrow();
+
+        assertEquals("INPUT", player.direction());
+        assertEquals("DATA", player.channel());
+        assertEquals("player", player.valueType());
+        assertTrue(player.required());
+        assertFalse(player.literal().editable());
+        assertTrue(graph.edges().stream().anyMatch(edge -> edge.targetPinId().equals(player.id())));
+        assertTrue(give.pins().stream().filter(pin -> pin.label().equals("material"))
+                .allMatch(pin -> pin.literal().editable()));
+    }
+
     @Test void rejectsStaleInvalidAndOversizedGraphRequestsWithStructuredCodes() {
         String yaml = "id: test:a\n";
         GraphContractException stale = assertThrows(GraphContractException.class, () -> projections.project(
@@ -146,12 +178,12 @@ class GraphProjectionServiceTest {
                 "npcs/a.yml", "npc", "test:a", "", "id: [\n", List.of()));
         assertEquals("INVALID_YAML", invalid.code());
 
-        StringBuilder large = new StringBuilder("content-version: 2\nscripts:\n  huge:\n    inputs: {}\n    outputs: {}\n    nodes:\n");
+        StringBuilder large = new StringBuilder("content-version: 2\nid: huge\ninputs: {}\noutputs: {}\nvariables: {}\nnodes:\n");
         for (int index = 0; index <= GraphProjectionService.MAX_NODES; index++)
-            large.append("      n").append(index).append(": { type: stop }\n");
-        large.append("    connections: {}\n");
+            large.append("  n").append(index).append(": { type: stop }\n");
+        large.append("connections: {}\n");
         GraphContractException bounded = assertThrows(GraphContractException.class, () -> project(
-                "scripts.yml", "script", "huge", "/scripts/huge", large.toString(), List.of()));
+                "scripts/huge.yml", "script", "huge", "", large.toString(), List.of()));
         assertEquals("GRAPH_NODE_LIMIT", bounded.code());
         assertEquals(413, bounded.getStatusCode().value());
 
@@ -163,9 +195,9 @@ class GraphProjectionServiceTest {
 
     @Test void relationshipProjectionUsesTypedResolvedUnresolvedAndCyclicServerReferences() {
         List<ContentFile> files = List.of(
-                file("dialogues/a.yml", "id: test:a\nstart: start\nnodes:\n  start:\n    script:\n      - type: goto\n        dialogue: test:b\n        node: start\n"),
-                file("dialogues/b.yml", "id: test:b\nstart: start\nnodes:\n  start:\n    script:\n      - type: goto\n        dialogue: test:a\n        node: start\n"),
-                file("npcs/guide.yml", "id: test:guide\ndialogues:\n  - id: test:missing\n"));
+                file("dialogues/a.yml", "content-version: 2\nid: test:a\nstart: start\nnodes:\n  start:\n    graph:\n      variables: {}\n      nodes: { jump: { type: goto, dialogue: test:b, node: start } }\n      connections: { enter: { from: $event.exec, to: jump.exec } }\n"),
+                file("dialogues/b.yml", "content-version: 2\nid: test:b\nstart: start\nnodes:\n  start:\n    graph:\n      variables: {}\n      nodes: { jump: { type: goto, dialogue: test:a, node: start } }\n      connections: { enter: { from: $event.exec, to: jump.exec } }\n"),
+                file("npcs/guide.yml", "content-version: 2\nid: test:guide\ndialogues:\n  - id: test:missing\n"));
         EditorGraphProjection result = projections.relationship(new RelationshipProjectionRequest(
                 files, ContentProjectRevision.compute(files)));
         assertEquals("relationship", result.resourceKind());
@@ -212,10 +244,10 @@ class GraphProjectionServiceTest {
     }
 
     @Test void stableScriptMappingKeysSurviveScalarEditsAndReorder() {
-        String original = "content-version: 2\nscripts:\n  flow:\n    inputs: {}\n    outputs: {}\n    nodes:\n      say: { type: say, text: Original }\n      wait: { type: wait, duration: 1s }\n    connections:\n      enter: { from: $input.exec, to: say.exec }\n      next: { from: say.success, to: wait.exec }\n      leave: { from: wait.success, to: $output.exec }\n";
-        String changed = "content-version: 2\nscripts:\n  flow:\n    inputs: {}\n    outputs: {}\n    nodes:\n      wait: { type: wait, duration: 2s }\n      say: { type: say, text: Changed }\n    connections:\n      enter: { from: $input.exec, to: say.exec }\n      next: { from: say.success, to: wait.exec }\n      leave: { from: wait.success, to: $output.exec }\n";
-        EditorGraphProjection first = project("scripts.yml", "script", "flow", "/scripts/flow", original, List.of());
-        EditorGraphProjection second = project("scripts.yml", "script", "flow", "/scripts/flow", changed, List.of());
+        String original = "content-version: 2\nid: flow\ninputs: {}\noutputs: {}\nvariables: {}\nnodes:\n  say: { type: say, text: Original }\n  wait: { type: wait, duration: 1s }\nconnections:\n  enter: { from: $input.exec, to: say.exec }\n  next: { from: say.success, to: wait.exec }\n  leave: { from: wait.success, to: $output.exec }\n";
+        String changed = "content-version: 2\nid: flow\ninputs: {}\noutputs: {}\nvariables: {}\nnodes:\n  wait: { type: wait, duration: 2s }\n  say: { type: say, text: Changed }\nconnections:\n  enter: { from: $input.exec, to: say.exec }\n  next: { from: say.success, to: wait.exec }\n  leave: { from: wait.success, to: $output.exec }\n";
+        EditorGraphProjection first = project("scripts/flow.yml", "script", "flow", "", original, List.of());
+        EditorGraphProjection second = project("scripts/flow.yml", "script", "flow", "", changed, List.of());
         Set<String> firstCommands = first.nodes().stream().filter(node -> node.kind().startsWith("script-"))
                 .map(EditorGraphProjection.GraphNode::id).collect(java.util.stream.Collectors.toSet());
         Set<String> secondCommands = second.nodes().stream().filter(node -> node.kind().startsWith("script-"))

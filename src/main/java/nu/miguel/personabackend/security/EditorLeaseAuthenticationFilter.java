@@ -91,7 +91,8 @@ public final class EditorLeaseAuthenticationFilter extends OncePerRequestFilter 
         String path = request.getRequestURI(), method = request.getMethod();
         if (path.equals("/ws/v1/plugin") || path.endsWith("/capabilities")
                 || (path.endsWith("/snapshot") || path.endsWith("/metadata")) && method.equals("PUT") || path.contains("/validation/")
-                || path.endsWith("/publishes/confirm") || path.matches(".*/publishes/[^/]+/result$"))
+                || path.endsWith("/publishes/claim") || path.endsWith("/publishes/confirm")
+                || path.matches(".*/publishes/[^/]+/result$"))
             return RequiredRole.PLUGIN;
         if (path.matches(".*/publishes/[^/]+/rollback-(project|result)$"))
             return RequiredRole.PLUGIN;

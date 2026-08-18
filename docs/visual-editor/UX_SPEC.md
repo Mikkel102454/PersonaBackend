@@ -118,7 +118,7 @@ unreachable nodes, implicit ends, and loops appear on the canvas and in Problems
 [Entry] ─► [Phase: delivery] ─condition────────► [Phase: reward] ─► [Complete]
                     │
                     ├─ objectives (3) ─► [nested objective graph]
-                    └─ lifecycle scripts ─► [nested script graph]
+                    └─ lifecycle graphs ─► [typed event graph]
 ```
 
 Phase cards summarize requirements, objectives, timers, and lifecycle hooks. Opening
@@ -148,8 +148,8 @@ assign without discarding current navigation state.
    └─ sound:data ────────────────┘       └─failure─► [Command: message]
 ```
 
-Every key below `scripts:` is a separately navigable graph but remains in
-`scripts.yml`. Reusable graphs use stable keyed nodes and connections, synthetic non-deletable
+Every file below the `scripts/` Sources root is a separately navigable reusable graph.
+Reusable graphs use stable keyed nodes and connections, synthetic non-deletable
 Input/Output boundaries, white triangular execution pins, and type-colored circular data pins.
 Unwired data inputs show type-appropriate inline controls; resource values can be dragged from the
 Content Browser to create value nodes. Call nodes mirror the selected script signature and open the
@@ -182,8 +182,8 @@ delete, normalize, or serialize through them.
 - Dragging a node moves layout only. Dragging a pin previews compatible targets;
   dropping commits one graph command. Invalid targets explain the rejected type,
   cardinality, scope, or cycle rule before any YAML request.
-- Reconnect drags an existing wire endpoint. Delete/disconnect, insert-on-wire, and
-  reroute/comment nodes are available from wire context menus.
+- Reconnect drags an existing wire endpoint. Double-clicking a wire adds a draggable
+  layout-only reroute point; disconnect, insert-on-wire, and straighten remain in its context menu.
 - Click selects, Shift/Ctrl/Cmd adds selection, and empty-canvas drag marquee-selects.
   Keyboard equivalents cover graph traversal, selection, movement, connection,
   deletion, duplication, alignment, distribution, and palette use.

@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import nu.miguel.personabackend.domain.AuditEvent;
 import nu.miguel.personabackend.session.EditorSession;
 import nu.miguel.personabackend.storage.InMemoryHostedMetadataStore;
+import nu.miguel.personabackend.relay.RelayJsonConfiguration;
 import org.junit.jupiter.api.Test;
 
 import java.util.*;
@@ -14,7 +15,8 @@ import static org.mockito.Mockito.*;
 class AuditServiceTest {
     @Test void persistsStructuredAuditAndDropsPrivateValues() throws Exception {
         InMemoryHostedMetadataStore store = new InMemoryHostedMetadataStore();
-        AuditService audit = new AuditService(store, new ObjectMapper());
+        ObjectMapper mapper = new RelayJsonConfiguration().protocolObjectMapper();
+        AuditService audit = new AuditService(store, mapper);
         EditorSession session = mock(EditorSession.class);
         when(session.id()).thenReturn(UUID.randomUUID());
         when(session.installationId()).thenReturn(UUID.randomUUID());
@@ -29,5 +31,8 @@ class AuditServiceTest {
         assertEquals("set", event.details().get("operation"));
         assertEquals("player", event.details().get("scope"));
         assertFalse(event.details().keySet().stream().anyMatch(key -> key.contains("memory") || key.contains("value")));
+        String serialized = mapper.writeValueAsString(event);
+        assertTrue(serialized.contains("occurredAt"));
+        assertTrue(serialized.contains(event.occurredAt().toString()));
     }
 }

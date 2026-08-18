@@ -91,6 +91,7 @@ class JdbcHostedMetadataStoreTest {
 
         assertEquals(1, sql.queryForObject("SELECT count(*) FROM publish_request", Integer.class));
         assertEquals(PublishRequest.Status.REQUESTED, store.publishRequest(publishId).orElseThrow().status());
+        assertEquals(publishId, store.firstPublishRequest(sessionId, PublishRequest.Status.REQUESTED).orElseThrow().id());
         assertEquals(1, sql.queryForObject("SELECT count(*) FROM subscription_definition", Integer.class));
         assertEquals(1, sql.queryForObject("SELECT count(*) FROM audit_event", Integer.class));
         assertEquals(0, sql.queryForObject("SELECT count(*) FROM information_schema.columns WHERE table_name IN ('content_revision','audit_event') AND column_name LIKE '%runtime%'", Integer.class));
@@ -119,13 +120,14 @@ class JdbcHostedMetadataStoreTest {
         for(UUID session:List.of(firstSession,secondSession))store.createSession(new HostedEditorSession(session,installation,
                 "console","CONSOLE",EditorScope.ALL,SessionRestrictions.UNRESTRICTED,Set.of(Capability.CONTENT_VIEW),firstAt,firstAt.plusSeconds(300),null));
         ContentRevision first=new ContentRevision(installation,"b".repeat(64),1,firstAt,firstSession,"key","first-signature",List.of());
-        ContentRevision second=new ContentRevision(installation,"b".repeat(64),1,secondAt,secondSession,"key","second-signature",List.of());
+        ContentRevision second=new ContentRevision(installation,"b".repeat(64),2,secondAt,secondSession,"key","second-signature",List.of());
 
         store.saveRevision(first);store.saveRevision(second);
 
         assertEquals(firstAt,store.latestRevisionForSession(firstSession).orElseThrow().createdAt());
         assertEquals("first-signature",store.latestRevisionForSession(firstSession).orElseThrow().signature());
         assertEquals(secondAt,store.latestRevisionForSession(secondSession).orElseThrow().createdAt());
+        assertEquals(2,store.latestRevisionForSession(secondSession).orElseThrow().contentFormatVersion());
         assertEquals("second-signature",store.latestRevisionForSession(secondSession).orElseThrow().signature());
     }
 

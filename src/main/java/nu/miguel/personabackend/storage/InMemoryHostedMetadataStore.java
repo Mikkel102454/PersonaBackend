@@ -16,6 +16,7 @@ public final class InMemoryHostedMetadataStore implements HostedMetadataStore {
     private final Map<UUID, BrowserIdentity> browsers = new ConcurrentHashMap<>();
     private final Map<UUID, List<CapabilityGrant>> grants = new ConcurrentHashMap<>();
     private final Map<String, ContentRevision> revisions = new ConcurrentHashMap<>();
+    private final Map<UUID, ContentRevision> revisionEnvelopes = new ConcurrentHashMap<>();
     private final Map<UUID, HostedDraft> drafts = new ConcurrentHashMap<>();
     private final Map<UUID, PublishRequest> publishes = new ConcurrentHashMap<>();
     private final Map<UUID, LiveSubscription> subscriptions = new ConcurrentHashMap<>();
@@ -58,15 +59,19 @@ public final class InMemoryHostedMetadataStore implements HostedMetadataStore {
                 value.initiatorId(), value.initiatorName(), value.scope(), value.restrictions(),
                 value.requestedCapabilities(), value.createdAt(), value.expiresAt(), revokedAt));
     }
-    @Override public void saveRevision(ContentRevision value) { revisions.putIfAbsent(key(value.installationId(), value.revision()), value); }
+    @Override public void saveRevision(ContentRevision value) {
+        ContentRevision content = revisions.computeIfAbsent(key(value.installationId(), value.revision()), ignored -> value);
+        if (value.sourceSessionId() != null) revisionEnvelopes.put(value.sourceSessionId(), new ContentRevision(
+                value.installationId(), value.revision(), value.contentFormatVersion(), value.createdAt(),
+                value.sourceSessionId(), value.installationPublicKey(), value.signature(), content.files()));
+    }
     @Override public Optional<ContentRevision> revision(UUID id, String revision) { return Optional.ofNullable(revisions.get(key(id, revision))); }
     @Override public Optional<ContentRevision> latestRevision(UUID id) {
         return revisions.values().stream().filter(value -> value.installationId().equals(id))
                 .max(Comparator.comparing(ContentRevision::createdAt));
     }
     @Override public Optional<ContentRevision> latestRevisionForSession(UUID sessionId) {
-        return revisions.values().stream().filter(value -> sessionId.equals(value.sourceSessionId()))
-                .max(Comparator.comparing(ContentRevision::createdAt));
+        return Optional.ofNullable(revisionEnvelopes.get(sessionId));
     }
     @Override public void saveDraft(HostedDraft value) { drafts.put(value.id(), value); }
     @Override public Optional<HostedDraft> draft(UUID id) { return Optional.ofNullable(drafts.get(id)); }
@@ -80,6 +85,10 @@ public final class InMemoryHostedMetadataStore implements HostedMetadataStore {
     }
     @Override public void savePublishRequest(PublishRequest value) { publishes.put(value.id(), value); }
     @Override public Optional<PublishRequest> publishRequest(UUID id) { return Optional.ofNullable(publishes.get(id)); }
+    @Override public Optional<PublishRequest> firstPublishRequest(UUID sessionId, PublishRequest.Status status) {
+        return publishes.values().stream().filter(value -> value.sessionId().equals(sessionId) && value.status() == status)
+                .min(Comparator.comparing(PublishRequest::requestedAt));
+    }
     @Override public void saveSubscription(LiveSubscription value) { subscriptions.put(value.id(), value); }
     @Override public Optional<LiveSubscription> subscription(UUID id){return Optional.ofNullable(subscriptions.get(id));}
     @Override public boolean deleteSubscription(UUID id,UUID sessionId){LiveSubscription value=subscriptions.get(id);return value!=null&&value.sessionId().equals(sessionId)&&subscriptions.remove(id,value);}
@@ -109,6 +118,8 @@ public final class InMemoryHostedMetadataStore implements HostedMetadataStore {
         int revisionCount = remove(revisions, value -> !protectedRevisions.contains(key(value.installationId(), value.revision()))
                 && !latest.contains(key(value.installationId(), value.revision()))
                 && (value.createdAt().isBefore(policy.revisionsBefore()) || !keep.contains(key(value.installationId(), value.revision()))));
+        revisionEnvelopes.entrySet().removeIf(entry -> !revisions.containsKey(
+                key(entry.getValue().installationId(), entry.getValue().revision())));
         int subscriptionCount = remove(subscriptions, value -> value.expiresAt().isBefore(policy.subscriptionsBefore()));
         int auditCount;
         synchronized (audit) { int before = audit.size(); audit.removeIf(value -> value.occurredAt().isBefore(policy.auditBefore())); auditCount = before - audit.size(); }

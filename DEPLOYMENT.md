@@ -50,8 +50,8 @@ Loopback HTTP/WS is accepted for local development only. The Compose ports bind 
 | `PERSONA_SESSION_LIFETIME` | no | Absolute editor-session lifetime (default `8h`); changing it affects newly created sessions |
 | `PERSONA_ACTUATOR_TOKEN` | yes | Random 32+ character bearer token |
 | `PERSONA_QUOTA_*` | no | Per-installation/session request bounds |
-| `PERSONA_PUBLISH_CONFIRMATION_LIFETIME` | no | Lifetime of a single-use in-game publish code (default `5m`) |
-| `PERSONA_QUOTA_PUBLISH_REQUESTS` | no | Publish requests allowed per session per confirmation window (default `20`) |
+| `PERSONA_PUBLISH_CONFIRMATION_LIFETIME` | no | Lifetime of a pending trusted-session publish request (default `5m`) |
+| `PERSONA_QUOTA_PUBLISH_REQUESTS` | no | Publish requests allowed per session per request window (default `20`) |
 | `PERSONA_RETENTION_REVISIONS` | no | Maximum age for unreferenced signed revisions (default `30d`) |
 | `PERSONA_RETENTION_DRAFTS` | no | Maximum age for drafts not retained by a publish record (default `30d`) |
 | `PERSONA_RETENTION_PUBLISHES` | no | Maximum age for terminal publish/rollback records (default `180d`) |

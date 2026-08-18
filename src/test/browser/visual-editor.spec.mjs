@@ -7,17 +7,12 @@ const sessionPath = '/editor/session/11111111-1111-4111-8111-111111111111';
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => {
-    const originalVerify = crypto.subtle.verify.bind(crypto.subtle);
-    Object.defineProperty(crypto.subtle, 'verify', {
-      configurable: true,
-      value: async (...args) => args[0] === 'Ed25519' ? true : originalVerify(...args)
-    });
     window.__personaServerAvailable = true;
     class FixtureWebSocket {
       static CONNECTING = 0; static OPEN = 1; static CLOSING = 2; static CLOSED = 3;
       constructor(url) {
         this.url = url; this.readyState = FixtureWebSocket.CONNECTING;
-        this.sequence = 0;
+        this.sequence = 0; this.serverMessages = Promise.resolve();
         window.__personaSocket = this;
         queueMicrotask(() => {
           if (!window.__personaServerAvailable) {
@@ -31,17 +26,25 @@ test.beforeEach(async ({ page }) => {
       send(serialized) {
         const message = JSON.parse(serialized);
         this.sent = this.sent || []; this.sent.push(message);
-        if (message.type === 'VALIDATION_REQUEST') setTimeout(() => this.onmessage?.({ data: JSON.stringify({
-          protocolVersion: 3, sessionId: '11111111-1111-4111-8111-111111111111', sequence: ++this.sequence,
-          type: 'VALIDATION_RESULT', signature: btoa(String.fromCharCode(...new Uint8Array(64))), payload: {
+        if (message.type === 'VALIDATION_REQUEST') this.deliver('VALIDATION_RESULT', {
             protocolVersion: 3, requestId: message.payload.requestId, valid: true, diagnostics: [],
             proposedRevision: 'a'.repeat(64), contentFormatVersion: 1
-          }
-        }) }), 0);
+          });
       }
-      close() {
+      deliver(type, payload, requestedSequence) {
+        this.serverMessages = this.serverMessages.then(async () => {
+          const sequence = requestedSequence ?? this.sequence + 1;
+          this.sequence = Math.max(this.sequence, sequence);
+          const response = await fetch('/fixture/sign', { method: 'POST', headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ protocolVersion: 3, sessionId: '11111111-1111-4111-8111-111111111111',
+              sequence, type, payload }) });
+          this.onmessage?.({ data: JSON.stringify(await response.json()) });
+        });
+        return this.serverMessages;
+      }
+      close(code = 1000, reason = 'closed') {
         if (this.readyState === FixtureWebSocket.CLOSED) return;
-        this.readyState = FixtureWebSocket.CLOSED; queueMicrotask(() => this.onclose?.({ code: 1000, reason: 'closed' }));
+        this.readyState = FixtureWebSocket.CLOSED; queueMicrotask(() => this.onclose?.({ code, reason }));
       }
       forceDisconnect() {
         window.__personaServerAvailable = false; this.readyState = FixtureWebSocket.CLOSED;
@@ -62,6 +65,29 @@ async function connect(page) {
   if (await page.locator('#content-browser').isHidden()) await page.locator('#browser-toggle').click();
   await page.locator('#project').getByText('demo:walker', { exact: true }).click();
   await expect(page.locator('.graph-node-card')).toHaveCount(3);
+}
+
+async function openSource(page, name) {
+  await page.locator('#sources-tree').getByRole('button', { name, exact: true }).click();
+}
+
+async function wireEndpointError(page) {
+  return page.locator('.graph-wire[data-edge-id="edge-1"]').evaluate(path => {
+    const source = document.querySelector('[data-pin-id$="#root:out:1"] .graph-pin-ring');
+    const target = document.querySelector('[data-pin-id$="#wait-one:in"] .graph-pin-ring');
+    const matrix = path.getScreenCTM(), start = path.getPointAtLength(0), end = path.getPointAtLength(path.getTotalLength());
+    const screenStart = new DOMPoint(start.x, start.y).matrixTransform(matrix);
+    const screenEnd = new DOMPoint(end.x, end.y).matrixTransform(matrix);
+    const sourceBox = source.getBoundingClientRect(), targetBox = target.getBoundingClientRect();
+    return Math.max(Math.hypot(screenStart.x - sourceBox.left - sourceBox.width / 2,
+      screenStart.y - sourceBox.top - sourceBox.height / 2),
+    Math.hypot(screenEnd.x - targetBox.left - targetBox.width / 2,
+      screenEnd.y - targetBox.top - targetBox.height / 2));
+  });
+}
+
+async function addRerouteOnFirstWire(page) {
+  await page.locator('.graph-wire-hit').first().dblclick();
 }
 
 async function createResource(page, kind, id) {
@@ -93,6 +119,12 @@ test('keeps creation read-only until Draft Edit trust is granted', async ({ page
   await page.keyboard.press('Control+n');
   await expect(page.locator('#create-dialog')).toBeHidden();
   await expect(page.locator('#status')).toContainText('Approve DRAFT_EDIT in Minecraft');
+
+  await page.getByRole('button', { name: 'Add node' }).click();
+  await page.locator('#palette-search').fill('wait');
+  await page.locator('#palette-results').getByRole('button', { name: 'Wait', exact: true }).click();
+  await expect(page.locator('#yaml-status')).toContainText('Editing content requires Draft Edit trust');
+  await expect(page.locator('.graph-node-card')).toHaveCount(3);
 });
 
 test('opens only after authentication and renders accessible nodes, pins, and wires', async ({ page }) => {
@@ -167,6 +199,8 @@ test('supports canvas zoom, node movement, selection synchronization, and keyboa
   await page.mouse.wheel(0, -300);
   await expect.poll(() => plane.getAttribute('style')).not.toBe(beforeZoom);
   await expect(page.locator('#graph-zoom')).not.toHaveText('100%');
+  await expect(page.locator('.graph-node-card')).toHaveCount(3);
+  await expect.poll(() => wireEndpointError(page)).toBeLessThan(2);
 
   const root = page.getByRole('group', { name: /root, sequence/ });
   const beforeMove = await root.getAttribute('style');
@@ -174,7 +208,8 @@ test('supports canvas zoom, node movement, selection synchronization, and keyboa
   const box = await header.boundingBox();
   await page.mouse.move(box.x + 20, box.y + 15);
   await page.mouse.down();
-  await page.mouse.move(box.x + 90, box.y + 55);
+  await page.mouse.move(box.x + 90, box.y + 55, { steps: 4 });
+  await expect.poll(() => wireEndpointError(page)).toBeLessThan(2);
   await page.mouse.up();
   await expect.poll(() => root.getAttribute('style')).not.toBe(beforeMove);
   const moved = await root.getAttribute('style');
@@ -191,6 +226,44 @@ test('supports canvas zoom, node movement, selection synchronization, and keyboa
   await expect(page.getByRole('group', { name: /wait-one, wait/ })).toHaveAttribute('aria-current', 'true');
 });
 
+test('keeps all node text and inline values visible at every canvas zoom', async ({ page }) => {
+  await connect(page);
+  const canvas = page.locator('#graph-canvas');
+  const wait = page.getByRole('group', { name: /wait-one, wait/ });
+  await expect(wait.locator('.graph-node-fields')).toBeVisible();
+  await expect(wait.locator('.graph-inline-pin-default')).toBeVisible();
+  await expect(wait.locator('.graph-pin-label').first()).toBeVisible();
+
+  await canvas.hover();
+  await page.mouse.wheel(0, 600);
+  await expect(wait.locator('.graph-node-fields')).toBeVisible();
+  await expect(wait.locator('.graph-inline-pin-default')).toBeVisible();
+  await expect(wait.locator('.graph-pin-label').first()).toBeVisible();
+  await expect(wait.locator('.graph-pin-ring').first()).toBeVisible();
+  await expect(wait.locator('.graph-node-title strong')).toBeVisible();
+  await expect(page.locator('#graph-minimap')).toHaveCount(0);
+  await expect.poll(() => wireEndpointError(page)).toBeLessThan(2);
+});
+
+test('keeps inline data values focused and commits typed input', async ({ page }) => {
+  await connect(page);
+  const duration = page.getByLabel('duration default, duration');
+  await duration.click();
+  await expect(duration).toBeFocused();
+  await duration.fill('2s');
+  await expect(duration).toHaveValue('2s');
+  await duration.press('Enter');
+  await expect(page.locator('#source')).toHaveValue(/duration: 2s/);
+  await expect.poll(() => wireEndpointError(page)).toBeLessThan(2);
+});
+
+test('remeasures wire endpoints when a rendered node changes size', async ({ page }) => {
+  await connect(page);
+  await expect.poll(() => wireEndpointError(page)).toBeLessThan(2);
+  await page.getByRole('group', { name: /root, sequence/ }).evaluate(node => { node.style.width = '340px'; });
+  await expect.poll(() => wireEndpointError(page)).toBeLessThan(2);
+});
+
 test('inserts through the digest-checked graph palette and preserves custom YAML', async ({ page }) => {
   await connect(page);
   await page.getByRole('button', { name: 'Add node' }).click();
@@ -199,26 +272,48 @@ test('inserts through the digest-checked graph palette and preserves custom YAML
   await search.pressSequentially('wait');
   await expect(search).toBeFocused();
   await expect(search).toHaveValue('wait');
-  page.once('dialog', dialog => dialog.accept('wait-two'));
   await page.locator('#palette-results').getByRole('button', { name: 'Wait', exact: true }).click();
 
-  await expect(page.getByRole('group', { name: /wait-two, wait/ })).toBeVisible();
+  await expect(page.getByRole('group', { name: /wait, wait/ })).toBeVisible();
   await expect(page.locator('.graph-node-card')).toHaveCount(4);
+  await expect(page.locator('#source')).toHaveValue(/id: wait/);
   await expect(page.locator('#source')).toHaveValue(/future: !vendor retained/);
   await expect(page.locator('#yaml-status')).toContainText('authoritative operation');
   await expect(page.getByRole('button', { name: 'Undo' })).toBeEnabled();
 });
 
+test('creates a context-menu node at the pointer without moving the viewport', async ({ page }) => {
+  await connect(page);
+  const placement = await page.locator('#graph-canvas').evaluate(canvas => {
+    const bounds = canvas.getBoundingClientRect(), clientX = bounds.left + bounds.width * .72;
+    const clientY = bounds.top + bounds.height * .68, matrix = document.querySelector('#graph-wires').getScreenCTM();
+    const point = new DOMPoint(clientX, clientY).matrixTransform(matrix.inverse());
+    const viewport = document.querySelector('#graph-plane').style.transform;
+    canvas.dispatchEvent(new MouseEvent('contextmenu', { clientX, clientY, bubbles: true, cancelable: true }));
+    return { x: point.x, y: point.y, viewport };
+  });
+  await page.locator('#palette-results').getByRole('button', { name: 'Cooldown', exact: true }).click();
+
+  const cooldown = page.getByRole('group', { name: /cooldown, cooldown/ });
+  await expect(cooldown).toBeVisible();
+  const actual = await cooldown.evaluate(element => {
+    const match = element.style.transform.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
+    return { x: Number(match?.[1]), y: Number(match?.[2]), viewport: document.querySelector('#graph-plane').style.transform };
+  });
+  expect(actual.x).toBeCloseTo(placement.x, 1);
+  expect(actual.y).toBeCloseTo(placement.y, 1);
+  expect(actual.viewport).toBe(placement.viewport);
+});
+
 test('reorders behavior children visually through stable neighboring ports', async ({ page }) => {
   await connect(page);
-  page.once('dialog', dialog => dialog.accept('second'));
   await page.getByRole('button', { name: 'Add node' }).click();
-  await page.getByRole('dialog').getByRole('button', { name: 'Wait' }).click();
-  const second = page.getByRole('group', { name: /second, wait/ }); await expect(second).toBeVisible();
+  await page.getByRole('dialog').getByRole('button', { name: 'Wait', exact: true }).click();
+  const second = page.getByRole('group', { name: /wait, wait/ }); await expect(second).toBeVisible();
   await nodeMenuAction(second, 'Move earlier');
   await expect.poll(async () => {
     const value = await page.locator('#source').inputValue();
-    return value.indexOf('id: second') < value.indexOf('id: wait-one');
+    return value.indexOf('id: wait') < value.indexOf('id: wait-one');
   }).toBe(true);
 });
 
@@ -228,25 +323,23 @@ test('discovers signed extension nodes in the shared palette and applies a narro
   await page.getByRole('button', { name: 'Add node' }).click();
   await page.locator('#palette-search').fill('vendor:wave');
   await expect(page.locator('#palette-results')).toContainText('Extension · vendor:wave');
-  page.once('dialog', dialog => dialog.accept('wave-one'));
-  await page.locator('#palette-results').getByRole('button', { name: 'Extension · vendor:wave' }).click();
+  await page.locator('#palette-results').getByRole('button', { name: 'Extension · vendor:wave', exact: true }).click();
 
-  await expect(page.getByRole('group', { name: /wave-one, action/ })).toBeVisible();
-  await expect(page.locator('#source')).toHaveValue(/- id: wave-one\n      type: action\n      action: vendor:wave/);
+  await expect(page.getByRole('group', { name: /wave, action/ })).toBeVisible();
+  await expect(page.locator('#source')).toHaveValue(/- id: wave\n      type: action\n      action: vendor:wave/);
   await expect(page.locator('#source')).toHaveValue(/future: !vendor retained/);
   expect((await page.locator('#source').inputValue()).replace(
-    /    - id: wave-one\n      type: action\n      action: vendor:wave\n/, '')).toBe(before);
+    /    - id: wave\n      type: action\n      action: vendor:wave\n/, '')).toBe(before);
 });
 
 test('inserts a compatible node on a behavior wire as one authoritative gesture', async ({ page }) => {
   await connect(page);
   await page.getByRole('button', { name: /Insert node on 1 connection/ }).click();
   await page.locator('#palette-search').fill('checkpoint');
-  page.once('dialog', dialog => dialog.accept('before-wait'));
   await page.locator('#palette-results').getByRole('button', { name: 'Checkpoint', exact: true }).click();
-  await expect(page.getByRole('group', { name: /before-wait, checkpoint/ })).toBeVisible();
+  await expect(page.getByRole('group', { name: /checkpoint, checkpoint/ })).toBeVisible();
   const yaml = await page.locator('#source').inputValue();
-  expect(yaml.indexOf('id: before-wait')).toBeLessThan(yaml.indexOf('id: wait-one'));
+  expect(yaml.indexOf('id: checkpoint')).toBeLessThan(yaml.indexOf('id: wait-one'));
   await expect(page.locator('#yaml-status')).toContainText('1 authoritative operation');
 });
 
@@ -256,21 +349,20 @@ test('copies an exact node across compatible behavior tabs through the authorita
   await page.getByRole('button', { name: 'Copy node' }).click();
   await createResource(page, 'behavior', 'demo:copy-target');
   await page.getByRole('group', { name: /root, sequence/ }).click();
-  page.once('dialog', dialog => dialog.accept('wait-copy'));
   await page.getByRole('button', { name: 'Paste node' }).click();
-  await expect(page.getByRole('group', { name: /wait-copy, wait/ })).toBeVisible();
-  await expect(page.locator('#source')).toHaveValue(/- id: wait-copy\n      type: wait\n      duration: 1s/);
+  await expect(page.getByRole('group', { name: /wait-one-copy, wait/ })).toBeVisible();
+  await expect(page.locator('#source')).toHaveValue(/- id: wait-one-copy\n      type: wait\n      duration: 1s/);
   await expect(page.locator('#yaml-status')).toContainText('Paste copied behavior node applied');
 });
 
 test('extracts a dialogue command to a reusable script and opens the new authoritative graph', async ({ page }) => {
   await connect(page);
   await createResource(page, 'dialogue', 'demo:extract-source');
-  const say = page.getByRole('group', { name: /New dialogue line, script-say/ });
+  const say = page.getByRole('group', { name: /say, script-say/ });
   page.once('dialog', dialog => dialog.accept('extracted-line'));
   await nodeMenuAction(say, 'Extract to reusable script');
   await expect(page.locator('.tab-open', { hasText: 'extracted-line' })).toHaveAttribute('aria-current', 'page');
-  await expect(page.locator('#source')).toHaveValue(/extracted-line:\n    inputs: \{\}\n    outputs: \{\}\n    nodes:/);
+  await expect(page.locator('#source')).toHaveValue(/id: extracted-line\ninputs: \{\}\noutputs: \{\}\nvariables: \{\}\nnodes:/);
 });
 
 test('atomically creates and assigns an NPC reference before opening the new target', async ({ page }) => {
@@ -279,8 +371,10 @@ test('atomically creates and assigns an NPC reference before opening the new tar
   page.once('dialog', dialog => dialog.accept('demo:assigned-walk'));
   await nodeMenuAction(page.getByRole('group', { name: /demo:assign-source, npc/ }), 'Create and assign player behavior');
   await expect(page.locator('.tab-open', { hasText: 'demo:assigned-walk' })).toHaveAttribute('aria-current', 'page');
+  await openSource(page, 'npcs');
   await page.locator('#project button', { hasText: 'demo:assign-source' }).click();
   await expect(page.locator('#source')).toHaveValue(/player-behavior: demo:assigned-walk/);
+  await openSource(page, 'behaviors');
   await expect(page.locator('#project')).toContainText('demo:assigned-walk');
 });
 
@@ -298,21 +392,26 @@ test('supports keyboard pin gestures and structured server rejection on wire dis
 
 test('recovers from stale graph digests without applying or retaining a false undo entry', async ({ page }) => {
   await connect(page);
+  await page.route('**/documents/mutate', route => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({
+    code: 'STALE_PROJECTION', message: 'A newer authoritative digest exists'
+  }) }), { times: 1 });
   await page.getByRole('button', { name: 'Add node' }).click();
   await page.locator('#palette-search').fill('wait');
-  page.once('dialog', dialog => dialog.accept('stale-node'));
   await page.locator('#palette-results').getByRole('button', { name: 'Wait', exact: true }).click();
   await expect(page.locator('#status')).toContainText('conflicted');
-  await expect(page.getByRole('group', { name: /stale-node/ })).toHaveCount(0);
+  await expect(page.getByRole('group', { name: /^wait, wait/ })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Undo' })).toBeDisabled();
   await expect(page.locator('.graph-node-card')).toHaveCount(3);
 });
 
 test('discards an in-flight graph mutation when the authenticated server disconnects', async ({ page }) => {
   await connect(page);
+  await page.route('**/documents/mutate', async route => {
+    await new Promise(resolve => setTimeout(resolve, 300));
+    await route.continue();
+  }, { times: 1 });
   await page.getByRole('button', { name: 'Add node' }).click();
   await page.locator('#palette-search').fill('wait');
-  page.once('dialog', dialog => dialog.accept('slow-node'));
   await page.locator('#palette-results').getByRole('button', { name: 'Wait', exact: true }).click();
   await page.evaluate(() => window.__disconnectPersona());
   await expect(page.locator('#workspace')).toBeHidden();
@@ -320,8 +419,8 @@ test('discards an in-flight graph mutation when the authenticated server disconn
   await page.evaluate(() => window.__setPersonaServerAvailable(true));
   await page.locator('#reconnect-now').click();
   await expect(page.locator('#workspace')).toBeVisible();
-  await expect(page.getByRole('group', { name: /slow-node/ })).toHaveCount(0);
-  await expect(page.locator('#source')).not.toHaveValue(/slow-node/);
+  await expect(page.getByRole('group', { name: /^wait, wait/ })).toHaveCount(0);
+  await expect(page.locator('#source')).not.toHaveValue(/id: wait\n/);
 });
 
 test('creates a resource through the server-previewed wizard and integrates it into tabs and dirty state', async ({ page }) => {
@@ -340,13 +439,13 @@ test('creates a resource through the server-previewed wizard and integrates it i
   await expect(page.locator('#project .resource-badge.dirty')).toHaveCount(1);
 });
 
-test('integrates all five creation kinds with recovery, draft validation, semantic diff, export, and publication', async ({ page }) => {
+test('integrates all five creation kinds with recovery, draft validation, semantic diff, and publication', async ({ page }) => {
   await connect(page);
   for (const [kind, id] of [['npc', 'demo:lifecycle-npc'], ['dialogue', 'demo:lifecycle-dialogue'],
     ['quest', 'demo:lifecycle-quest'], ['behavior', 'demo:lifecycle-behavior'], ['script', 'lifecycle-script']])
     await createResource(page, kind, id);
 
-  await expect(page.locator('#project .resource-badge.dirty')).toHaveCount(5);
+  await expect(page.locator('.resource-tab .dirty')).toHaveCount(5);
   await expect(page.locator('#validation-summary')).toContainText('Validated by Persona');
   await page.waitForTimeout(400);
   const recovery = await page.evaluate(() => JSON.parse(sessionStorage.getItem(
@@ -358,19 +457,21 @@ test('integrates all five creation kinds with recovery, draft validation, semant
   await expect(page.locator('#semantic-diff-summary')).toContainText('5 semantic changes');
   await page.locator('#semantic-diff-close').click();
 
-  const download = page.waitForEvent('download');
-  await page.getByRole('button', { name: 'Download project' }).click();
-  expect((await download).suggestedFilename()).toBe('persona-project.zip');
+  await expect(page.getByRole('button', { name: 'Download project' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Download changed' })).toHaveCount(0);
 
-  await expect(page.getByRole('button', { name: 'Request publication' })).toBeEnabled();
-  await page.getByRole('button', { name: 'Request publication' }).click();
+  await expect(page.getByRole('button', { name: 'Publish' })).toBeEnabled();
+  await page.getByRole('button', { name: 'Publish' }).click();
   await expect(page.locator('#status')).toContainText('published revision');
 
   await page.reload();
   await expect(page.locator('#workspace')).toBeVisible();
   await expect(page.locator('#status')).toContainText('Recovered unsaved changes');
-  for (const id of ['demo:lifecycle-npc', 'demo:lifecycle-dialogue', 'demo:lifecycle-quest',
-    'demo:lifecycle-behavior', 'lifecycle-script']) await expect(page.locator('#content-browser')).toContainText(id);
+  for (const [folder, id] of [['npcs', 'demo:lifecycle-npc'], ['dialogues', 'demo:lifecycle-dialogue'],
+    ['quests', 'demo:lifecycle-quest'], ['behaviors', 'demo:lifecycle-behavior'], ['scripts', 'lifecycle-script']]) {
+    await openSource(page, folder);
+    await expect(page.locator('#project')).toContainText(id);
+  }
 });
 
 test('duplicates, atomically renames, safely locates, and deletes resources without reviving deleted YAML', async ({ page }) => {
@@ -391,8 +492,12 @@ test('duplicates, atomically renames, safely locates, and deletes resources with
   await expect(page.locator('#content-browser')).toContainText('demo:operations-renamed');
   page.off('dialog', renameDialogs);
 
-  await page.getByRole('button', { name: 'Move to safe path' }).click();
-  await expect(page.locator('#status')).toContainText('canonical server-approved path');
+  const moveDialogs = dialog => dialog.type() === 'prompt'
+    ? dialog.accept('behaviors/archive/operations-renamed.yml') : dialog.accept();
+  page.on('dialog', moveDialogs);
+  await page.getByRole('button', { name: 'Move to folder' }).click();
+  await expect(page.locator('#file-name')).toContainText('behaviors/archive/operations-renamed.yml');
+  page.off('dialog', moveDialogs);
 
   page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
@@ -417,6 +522,7 @@ test('restores graph selection and viewport independently for each open resource
   await page.locator('#create-kind').selectOption('npc');
   await page.locator('#create-id').fill('demo:context');
   await page.getByRole('button', { name: 'Create and open' }).click();
+  await openSource(page, 'behaviors');
   await page.locator('#project').getByText('demo:walker', { exact: true }).click();
 
   await expect(root).toHaveAttribute('style', savedStyle);
@@ -444,7 +550,9 @@ test('keeps bounded comments, groups, bookmarks, color labels, collapse state, a
 
   await nodeMenuAction(root, 'Bookmark');
   await nodeMenuAction(root, 'Collapse');
-  await page.getByRole('button', { name: /Add layout-only reroute/ }).click();
+  await expect(page.locator('.graph-reroute-add')).toHaveCount(0);
+  await expect(page.locator('.wire-label')).toHaveCount(0);
+  await addRerouteOnFirstWire(page);
   await expect(page.getByRole('button', { name: /Reroute 1/ })).toBeVisible();
   await expect(root).toHaveClass(/bookmarked/); await expect(root).toHaveClass(/collapsed/);
   await page.getByRole('button', { name: 'Undo' }).click();
@@ -466,7 +574,7 @@ test('keeps bounded comments, groups, bookmarks, color labels, collapse state, a
 
 test('moves layout-only wire reroute points and restores their final drag with undo and redo', async ({ page }) => {
   await connect(page);
-  await page.getByRole('button', { name: /Add layout-only reroute/ }).click();
+  await addRerouteOnFirstWire(page);
   const reroute = page.getByRole('button', { name: /Reroute 1/ });
   await expect(reroute).toBeVisible();
   const before = { x: await reroute.getAttribute('cx'), y: await reroute.getAttribute('cy') };
@@ -522,17 +630,14 @@ test('relationship map exposes resolved typed links with keyboard open-source an
 test('renders trusted live runtime state as a read-only graph overlay without changing YAML', async ({ page }) => {
   await connect(page); const before = await page.locator('#source').inputValue();
   await page.getByRole('button', { name: 'Live server' }).click();
-  await page.evaluate(() => {
+  await page.evaluate(async () => {
     const socket = window.__personaSocket;
     const subscriptionId = socket.sent.find(message => message.type === 'LIVE_SUBSCRIBE').payload.subscriptionId;
-    socket.onmessage({ data: JSON.stringify({ protocolVersion: 3,
-      sessionId: '11111111-1111-4111-8111-111111111111', sequence: 100, type: 'LIVE_SNAPSHOT',
-      signature: btoa(String.fromCharCode(...new Uint8Array(64))), payload: { protocolVersion: 3,
+    await socket.deliver('LIVE_SNAPSHOT', { protocolVersion: 3,
         subscriptionId, revision: 1, full: true, removedKeys: [], players: [], npcs: [], quests: [], dialogues: [], memories: [],
         behaviors: [{ definitionId: 'demo:npc', instanceId: 'one', playerId: 'player', behaviorId: 'demo:walker',
           status: 'RUNNING', runningPath: ['root', 'wait-one'], checkpoint: 'wait-one', nextWakeAt: null,
-          inbox: [], droppedEvents: 0, recentOutcomes: [], recentConditions: [] }], server: null }
-    }) });
+          inbox: [], droppedEvents: 0, recentOutcomes: [], recentConditions: [] }], server: null }, 100);
   });
   await expect(page.getByRole('group', { name: /root, sequence/ })).toHaveClass(/live-active/);
   await expect(page.getByRole('group', { name: /wait-one, wait/ })).toHaveClass(/live-active/);
@@ -547,6 +652,7 @@ test('locks immediately on server loss and refreshes authoritative state before 
   await page.evaluate(() => window.__disconnectPersona());
   await expect(page.locator('#workspace')).toBeHidden();
   await expect(page.locator('#reconnect')).toBeVisible();
+  await expect(page.locator('#reconnect-reason')).toContainText('Persona disconnected');
   await expect(page.locator('#source')).toBeDisabled();
   await expect(page.locator('#status')).toContainText('locked');
 
@@ -651,12 +757,12 @@ test('large graph render, warm tab switch, pan/zoom, and browser heap stay withi
   let started = Date.now();
   await page.locator('#project').getByText('perf:large', { exact: true }).click();
   await expect(page.getByRole('group', { name: /root, sequence/ })).toBeVisible({ timeout: 10_000 });
+  await expect(page.locator('.tab-open', { hasText: 'perf:large' })).toHaveAttribute('aria-current', 'page');
   expect(Date.now() - started).toBeLessThan(5000);
-  await expect(page.locator('#graph-minimap .minimap-node')).toHaveCount(2001, { timeout: 10_000 });
   expect(await page.locator('.graph-node-card').count()).toBeLessThan(100);
 
   await page.locator('.tab-open', { hasText: 'demo:walker' }).click();
-  await expect(page.locator('#graph-minimap .minimap-node')).toHaveCount(3);
+  await expect(page.locator('.tab-open', { hasText: 'demo:walker' })).toHaveAttribute('aria-current', 'page');
   const warmSwitchMs = await page.evaluate(async () => {
     const tab = [...document.querySelectorAll('.tab-open')].find(item => item.textContent.includes('perf:large'));
     const start = performance.now(); tab.click();
@@ -664,8 +770,8 @@ test('large graph render, warm tab switch, pan/zoom, and browser heap stay withi
     return performance.now() - start;
   });
   await expect(page.getByRole('group', { name: /root, sequence/ })).toBeVisible();
+  await expect(page.locator('.tab-open', { hasText: 'perf:large' })).toHaveAttribute('aria-current', 'page');
   expect(warmSwitchMs).toBeLessThan(1000);
-  await expect(page.locator('#graph-minimap .minimap-node')).toHaveCount(2001);
   expect(await page.locator('.graph-node-card').count()).toBeLessThan(100);
 
   started = Date.now();

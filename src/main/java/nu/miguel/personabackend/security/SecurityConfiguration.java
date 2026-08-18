@@ -35,7 +35,8 @@ public class SecurityConfiguration {
                         .requestMatchers(HttpMethod.PUT, "/api/v1/editor/sessions/*/snapshot").hasRole("PLUGIN")
                         .requestMatchers(HttpMethod.PUT, "/api/v1/editor/sessions/*/metadata").hasRole("PLUGIN")
                         .requestMatchers(HttpMethod.GET, "/api/v1/editor/sessions/*/validation/*/project").hasRole("PLUGIN")
-                        .requestMatchers(HttpMethod.POST, "/api/v1/editor/sessions/*/publishes/confirm").hasRole("PLUGIN")
+                        .requestMatchers(HttpMethod.POST, "/api/v1/editor/sessions/*/publishes/claim",
+                                "/api/v1/editor/sessions/*/publishes/confirm").hasRole("PLUGIN")
                         .requestMatchers(HttpMethod.POST, "/api/v1/editor/sessions/*/publishes/*/result").hasRole("PLUGIN")
                         .requestMatchers("/api/v1/editor/sessions/*/publishes/*/rollback-*").hasRole("PLUGIN")
                         .requestMatchers(HttpMethod.GET, "/api/v1/editor/sessions/*/snapshot").hasAuthority("CAP_CONTENT_VIEW")
@@ -47,6 +48,10 @@ public class SecurityConfiguration {
                                 "/api/v1/editor/sessions/*/projects/duplicate",
                                 "/api/v1/editor/sessions/*/projects/rename",
                                 "/api/v1/editor/sessions/*/projects/move",
+                                "/api/v1/editor/sessions/*/projects/folders/create",
+                                "/api/v1/editor/sessions/*/projects/folders/move",
+                                "/api/v1/editor/sessions/*/projects/folders/delete-preview",
+                                "/api/v1/editor/sessions/*/projects/folders/delete",
                                 "/api/v1/editor/sessions/*/projects/extract-script",
                                 "/api/v1/editor/sessions/*/projects/create-and-assign",
                                 "/api/v1/editor/sessions/*/projects/delete").hasAuthority("CAP_DRAFT_EDIT")

@@ -64,12 +64,7 @@ public final class ProjectExportService {
     }
 
     private static boolean validPath(String path) {
-        if (path == null || path.isBlank() || path.startsWith("/") || path.contains("\\")
-                || path.contains("\u0000")) return false;
-        if (Arrays.stream(path.split("/", -1)).anyMatch(part -> part.isBlank() || part.equals(".") || part.equals("..")))
-            return false;
-        String lower = path.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".yml") || lower.endsWith(".yaml");
+        return ProjectPathRules.MANIFEST_PATH.equals(path) || ProjectPathRules.validResourcePath(path);
     }
 
     private static MessageDigest digest() {

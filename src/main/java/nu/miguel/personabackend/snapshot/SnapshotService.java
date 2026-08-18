@@ -20,6 +20,7 @@ import nu.miguel.personabackend.storage.InMemoryHostedMetadataStore;
 import nu.miguel.personabackend.domain.ContentRevision;
 import nu.miguel.personabackend.audit.AuditService;
 import nu.miguel.personabackend.domain.AuditEvent;
+import nu.miguel.personabackend.project.ProjectPathRules;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 @Service
@@ -102,23 +103,23 @@ public final class SnapshotService {
             revision.update((byte) 0);
         }
         if (!constantEquals(hex(revision.digest()), snapshot.revision())) throw bad("Snapshot revision is invalid");
+        ProjectPathRules.Manifest manifest = ProjectPathRules.manifest(ordered);
+        if (!manifest.folders().equals(snapshot.folders())
+                || !constantEquals(manifest.digest(), snapshot.manifestDigest()))
+            throw bad("Snapshot folder metadata does not match .persona/project.yml");
         if (!verify(session.installationKey(), snapshot.signingInput(), snapshot.signature()))
             throw new ResponseStatusException(HttpStatus.UNAUTHORIZED, "Invalid snapshot signature");
     }
 
     private static boolean validPath(String path) {
-        if (path == null || path.isBlank() || path.startsWith("/") || path.contains("\\") || path.contains("\u0000")) return false;
-        String[] parts = path.split("/");
-        if (Arrays.stream(parts).anyMatch(part -> part.isBlank() || part.equals(".") || part.equals(".."))) return false;
-        String lower = path.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".yml") || lower.endsWith(".yaml");
+        return ProjectPathRules.MANIFEST_PATH.equals(path) || ProjectPathRules.validResourcePath(path);
     }
 
     private static boolean allowed(EditorScope scope, String path) {
         return switch (scope) {
-            case ALL, CONTENT -> path.equals("scripts.yml") || path.startsWith("behaviors/")
+            case ALL, CONTENT -> path.equals(ProjectPathRules.MANIFEST_PATH) || path.startsWith("scripts/") || path.startsWith("behaviors/")
                     || path.startsWith("npcs/") || path.startsWith("dialogues/") || path.startsWith("quests/");
-            case SCRIPTS -> path.equals("scripts.yml");
+            case SCRIPTS -> path.startsWith("scripts/");
             case BEHAVIORS -> path.startsWith("behaviors/");
             case NPCS -> path.startsWith("npcs/");
             case DIALOGUES -> path.startsWith("dialogues/");
@@ -128,9 +129,10 @@ public final class SnapshotService {
 
     public HostedMetadataStore metadataStore() { return metadata; }
     private ContentSnapshot snapshot(ContentRevision revision) {
+        ProjectPathRules.Manifest manifest = ProjectPathRules.manifest(revision.files());
         return new ContentSnapshot(Protocol.VERSION, revision.sourceSessionId(), revision.revision(),
                 revision.contentFormatVersion(), revision.createdAt(), revision.installationPublicKey(),
-                revision.files(), revision.signature());
+                revision.files(), manifest.folders(), manifest.digest(), revision.signature());
     }
     private static byte[] decode(String value) {
         try { return Base64.getDecoder().decode(value); }

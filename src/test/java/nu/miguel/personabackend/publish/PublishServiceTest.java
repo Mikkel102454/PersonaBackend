@@ -11,6 +11,7 @@ import nu.miguel.personabackend.session.*;
 import nu.miguel.personabackend.snapshot.SnapshotService;
 import nu.miguel.personabackend.storage.*;
 import nu.miguel.personabackend.validation.ValidationService;
+import nu.miguel.personabackend.project.ProjectPathRules;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -38,13 +39,13 @@ class PublishServiceTest {
             new SemanticDiffService(new YamlDocumentService()), json, audit, limits,
             new PublishProperties(Duration.ofMinutes(5), 20));
 
-    @Test void requiresExactValidatedRevisionAndConsumesInGameConfirmationOnce() throws Exception {
+    @Test void requiresExactValidatedRevisionAndLetsTrustedPluginClaimOnce() throws Exception {
         Session fixture = session();
-        String baseYaml = "# base\nscripts: {}\n";
+        String baseYaml = "# base\ncontent-version: 2\nid: publish-test\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n";
         ContentSnapshot base = snapshot(fixture.installation(), fixture.created().sessionId(), baseYaml);
         snapshots.store(fixture.created().sessionId(), fixture.created().pluginLeaseToken(), base);
-        String candidate = "# base\nscripts:\n  hello: []\n";
-        ContentFile candidateFile = file("scripts.yml", candidate);
+        String candidate = "# base\ncontent-version: 2\nid: publish-test\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: { hello: { type: stop } }\nconnections: {}\n";
+        ContentFile candidateFile = file("scripts/publish-test.yml", candidate);
         UUID draftId = UUID.randomUUID();
         DraftResponse draft = drafts.save(fixture.created().sessionId(), draftId, fixture.verified().browserLeaseToken(),
                 new DraftSaveRequest(Protocol.VERSION, base.revision(), List.of(candidateFile)));
@@ -58,14 +59,12 @@ class PublishServiceTest {
         PublishCreateResponse requested = publishes.request(fixture.created().sessionId(),
                 fixture.verified().browserLeaseToken(), new PublishCreateRequest(Protocol.VERSION, draftId, proposed));
 
-        assertEquals("AWAITING_CONFIRMATION", requested.status()); assertEquals(12, requested.confirmationCode().length());
+        assertEquals("REQUESTED", requested.status()); assertEquals(12, requested.confirmationCode().length());
         assertThrows(ResponseStatusException.class, () -> publishes.confirm(fixture.created().sessionId(),
                 fixture.created().pluginLeaseToken(), new PublishConfirmRequest(Protocol.VERSION, "AAAAAAAAAAAA")));
-        PublishProject project = publishes.confirm(fixture.created().sessionId(), fixture.created().pluginLeaseToken(),
-                new PublishConfirmRequest(Protocol.VERSION, requested.confirmationCode()));
+        PublishProject project = publishes.claim(fixture.created().sessionId(), fixture.created().pluginLeaseToken()).orElseThrow();
         assertEquals(candidate, project.files().getFirst().content()); assertEquals(proposed, project.proposedRevision());
-        assertThrows(ResponseStatusException.class, () -> publishes.confirm(fixture.created().sessionId(),
-                fixture.created().pluginLeaseToken(), new PublishConfirmRequest(Protocol.VERSION, requested.confirmationCode())));
+        assertTrue(publishes.claim(fixture.created().sessionId(), fixture.created().pluginLeaseToken()).isEmpty());
 
         PublishStatusResponse completed = publishes.complete(fixture.created().sessionId(), requested.publishId(),
                 fixture.created().pluginLeaseToken(), new PublishApplyResult(Protocol.VERSION, requested.publishId(), true,
@@ -90,11 +89,11 @@ class PublishServiceTest {
 
     @Test void rejectsUnvalidatedOrMismatchedCandidate() throws Exception {
         Session fixture = session();
-        ContentSnapshot base = snapshot(fixture.installation(), fixture.created().sessionId(), "scripts: {}\n");
+        ContentSnapshot base = snapshot(fixture.installation(), fixture.created().sessionId(), "content-version: 2\nid: publish-test\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n");
         snapshots.store(fixture.created().sessionId(), fixture.created().pluginLeaseToken(), base);
         UUID draftId = UUID.randomUUID();
         DraftResponse draft = drafts.save(fixture.created().sessionId(), draftId, fixture.verified().browserLeaseToken(),
-                new DraftSaveRequest(Protocol.VERSION, base.revision(), List.of(file("scripts.yml", "scripts: {x: []}\n"))));
+                new DraftSaveRequest(Protocol.VERSION, base.revision(), List.of(file("scripts/publish-test.yml", "content-version: 2\nid: publish-test\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: { x: { type: stop } }\nconnections: {}\n"))));
         assertThrows(ResponseStatusException.class, () -> publishes.request(fixture.created().sessionId(),
                 fixture.verified().browserLeaseToken(), new PublishCreateRequest(Protocol.VERSION, draftId,
                         ContentProjectRevision.compute(draft.files()))));
@@ -122,12 +121,13 @@ class PublishServiceTest {
         return new Session(installation, created, verified);
     }
     private ContentSnapshot snapshot(KeyPair installation, UUID sessionId, String content) throws Exception {
-        ContentFile file = file("scripts.yml", content); String revision = ContentProjectRevision.compute(List.of(file));
-        ContentSnapshot unsigned = new ContentSnapshot(Protocol.VERSION, sessionId, revision, 1, Instant.now(),
-                Base64.getEncoder().encodeToString(installation.getPublic().getEncoded()), List.of(file), "");
+        ContentFile file = file("scripts/publish-test.yml", content); String revision = ContentProjectRevision.compute(List.of(file));
+        ContentSnapshot unsigned = new ContentSnapshot(Protocol.VERSION, sessionId, revision, 2, Instant.now(),
+                Base64.getEncoder().encodeToString(installation.getPublic().getEncoded()), List.of(file),
+                Set.of(), ProjectPathRules.sha256(""), "");
         return new ContentSnapshot(unsigned.protocolVersion(), unsigned.sessionId(), unsigned.revision(),
                 unsigned.contentFormatVersion(), unsigned.createdAt(), unsigned.installationPublicKey(), unsigned.files(),
-                sign(installation.getPrivate(), unsigned.signingInput()));
+                unsigned.folders(), unsigned.manifestDigest(), sign(installation.getPrivate(), unsigned.signingInput()));
     }
     private static ContentFile file(String path, String content) throws Exception {
         return new ContentFile(path, HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")

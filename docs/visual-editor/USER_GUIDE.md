@@ -7,10 +7,11 @@ snapshot before editing resumes. There is no offline editing mode.
 
 ## Find and open content
 
-The Content Browser groups NPCs, dialogues, quests, behaviours, reusable scripts, and other YAML.
-Search matches IDs, names, paths, types, tags, and typed references. Filters expose dirty, invalid,
-unreferenced, missing-reference, and live resources. Resources open in reorderable tabs and retain
-their own selection and viewport.
+The Content Browser coordinates a Sources tree with a list/tile asset view. NPCs, Dialogues,
+Quests, Behaviours, and Scripts are fixed roots; real nested folders are expandable beneath them.
+Breadcrumbs, back/forward history, recursive-search scope, filters, sorting, and result counts all
+follow the selected folder. Search matches IDs, names, paths, types, tags, typed references, and
+validation state. Resources open in reorderable tabs and retain their own selection and viewport.
 
 - `Ctrl/Cmd+P`: quick open
 - `Ctrl/Cmd+Tab`: switch recent resources
@@ -33,14 +34,15 @@ fields, and extension-owned data outside the selected range are not serialized o
 
 Use Add node, right-click empty canvas space, or drag from an output pin to open the compatible
 palette. Click pins or drag between them to connect. Invalid type, cardinality, and cycle gestures
-are rejected before YAML changes. Wire controls disconnect, insert a node on a behaviour wire, or
-add a layout-only reroute. Node cards expose duplicate, delete, wrap/unwrap, bookmark, collapse,
-resource navigation, and kind-specific actions.
+are rejected before YAML changes. Double-click a wire to add a draggable layout-only reroute point;
+Straighten in its context menu removes those points. Alt-click breaks a pin/wire; Ctrl/Cmd-drag moves existing links. Dropping
+on an occupied single input atomically replaces its old wire. Node cards expose duplicate, delete,
+replace, extract, variables, bookmarks, tracepoints, collapse, and kind-specific actions.
 
 Marquee with Shift, add to selection with Ctrl/Cmd, and drag any selected card to move the group.
 The toolbar aligns and distributes selections. `Ctrl/Cmd` plus an arrow nudges selected cards;
-Shift increases the step. Copy/paste transfers an exact behaviour node between compatible tabs and
-asks for a new stable ID. Layout commands are undoable but never modify content YAML.
+Shift increases the step. Find in Graph searches the current graph, while node bookmarks and named
+viewport bookmarks provide local navigation. Layout commands are undoable but never modify content YAML.
 
 Visual, Split, and YAML modes synchronize source selections in both directions. Invalid YAML keeps
 the last valid graph visible but stale and disables visual mutations until the source parses again.
@@ -55,13 +57,13 @@ Custom YAML cards identify ranges that must be edited in YAML.
 - Delete is blocked when typed inbound references exist.
 - NPC cards can create and assign a player/shared behaviour or dialogue atomically.
 - Missing reference cards create the already-assigned target and open it while preserving history.
-- Dialogue commands can be extracted exactly to `scripts.yml`; the source command becomes a typed
-  `run-script` reference and the new script opens in a tab.
+- A selected graph node can be extracted to a new `scripts/<folders>/<id>.yml`; the source becomes
+  a typed `run-script` call and the new script opens in a tab.
 - Behaviour branches retain Convert selection to behaviour. Script cards expose typed callers.
-- Reusable scripts require `scripts.yml` content format 2. Their Input/Output cards edit the typed
+- Reusable scripts are individual content-version 2 files below `scripts/`. Their Input/Output cards edit the typed
   signature; the Inspector can rename, reorder, change type, or delete a selected parameter. Rename
   and delete update callers atomically, while incompatible type changes are blocked.
-- Dragging a resource from the Content Browser onto a reusable-script canvas creates a typed value
+- Dragging a resource from the Content Browser onto any explicit event/reusable graph creates a typed value
   node. Connect only matching circular data pins; triangular execution pins define control flow.
   Unconnected data inputs expose inline checkbox, numeric, duration, text, or resource controls.
 
@@ -76,14 +78,14 @@ patches, Persona validation remains authoritative, Semantic diff describes typed
 export always uses the current server-connected project. Publication remains capability-gated and
 requires the existing in-game confirmation.
 
-Live data is a signed, read-only overlay: active behaviour paths, dialogue lines/choices, quest
-progress, NPC presentation/anchors, timers, outcomes, and checkpoints can highlight cards without
-changing graph structure or YAML. Elevated live mutation controls are shown only with their
-existing capability and always require explicit review.
+Live data is a signed, read-only overlay. Local tracepoints and watched pins subscribe only to the
+chosen nodes/pins, do not pause Minecraft, and keep at most 1,000 entries in memory. Active nodes
+and execution wires highlight with order, values, branch results, failures, and limit diagnostics.
+Disconnect clears captured values; tracepoint definitions remain local layout metadata.
 
 ## Layout and accessibility
 
-Viewport, card positions, selection, comments, groups, colors, collapse state, bookmarks, and
+Viewport, named viewport bookmarks, card positions, selection, comments, groups, colors, collapse state, tracepoints, watched pins, bookmarks, and
 reroutes use a bounded, versioned IndexedDB store keyed by installation, project revision, kind, and
 resource ID. Rename lookup may reuse the newest matching resource layout; stale entries expire and
 are pruned. Layout metadata never enters Persona YAML.

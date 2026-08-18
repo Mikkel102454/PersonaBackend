@@ -68,7 +68,7 @@ public final class SemanticDiffService {
         return value.length() <= 256 ? value : value.substring(0, 256) + "…";
     }
     private static String category(String path) {
-        if (path.equals("scripts.yml")) return "script";
+        if (path.startsWith("scripts/") && path.matches(".*\\.ya?ml$")) return "script";
         for (String category : List.of("behavior", "npc", "dialogue", "quest"))
             if (path.startsWith(category + "s/")) return category;
         return "content";

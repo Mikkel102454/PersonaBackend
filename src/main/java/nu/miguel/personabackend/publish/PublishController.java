@@ -20,6 +20,12 @@ public final class PublishController {
         return ResponseEntity.status(HttpStatus.CREATED).cacheControl(CacheControl.noStore())
                 .body(publishes.request(sessionId, bearer(authorization), request));
     }
+    @PostMapping("/claim")
+    public ResponseEntity<PublishProject> claim(@PathVariable UUID sessionId,
+                                                @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization) {
+        return publishes.claim(sessionId, bearer(authorization)).map(ResponseEntity::ok)
+                .orElseGet(() -> ResponseEntity.noContent().build());
+    }
     @PostMapping("/confirm")
     public PublishProject confirm(@PathVariable UUID sessionId,
                                   @RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,

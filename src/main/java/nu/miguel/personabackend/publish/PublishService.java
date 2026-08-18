@@ -57,7 +57,7 @@ public final class PublishService {
         UUID publishId = UUID.randomUUID(); String code = randomCode(); Instant now = Instant.now();
         SemanticDiffResponse diff = diffs.compare(new SemanticDiffRequest(base.files(), draft.files()));
         PublishRequest record = new PublishRequest(publishId, session.installationId(), session.id(), draft.id(),
-                draft.baseRevision(), proposed, PublishRequest.Status.AWAITING_CONFIRMATION, now, null,
+                draft.baseRevision(), proposed, PublishRequest.Status.REQUESTED, now, null,
                 write(Map.of("valid", true, "proposedRevision", proposed,"metadataRevision",metadataRevision)), write(diff), draft.baseRevision());
         metadata.savePublishRequest(record);
         state.put(codeKey(sessionId, code), publishId.toString(), properties.confirmationLifetime());
@@ -70,7 +70,8 @@ public final class PublishService {
                 record.status().name(), code, now.plus(properties.confirmationLifetime()));
     }
 
-    public PublishProject confirm(UUID sessionId, String pluginLease, PublishConfirmRequest body) {
+    /** Compatibility path for older Persona clients. New clients claim trusted-session publishes automatically. */
+    public synchronized PublishProject confirm(UUID sessionId, String pluginLease, PublishConfirmRequest body) {
         EditorSession session = sessions.authenticatePlugin(sessionId, pluginLease); requireCapability(session);
         limits.check("publish-confirm", sessionId.toString(), 10, properties.confirmationLifetime());
         if (body == null || body.protocolVersion() != Protocol.VERSION || body.confirmationCode() == null)
@@ -79,25 +80,37 @@ public final class PublishService {
         String key = codeKey(sessionId, code);
         String publishText = state.get(key).orElseThrow(() -> denied("Confirmation code is invalid or expired"));
         UUID publishId;
-        try { publishId = UUID.fromString(publishText); } catch (IllegalArgumentException error) { throw denied("Confirmation code is invalid"); }
+        try { publishId = UUID.fromString(publishText); }
+        catch (IllegalArgumentException error) { throw denied("Confirmation code is invalid"); }
         PublishRequest publish = requirePublish(session, publishId);
-        if (publish.status() != PublishRequest.Status.AWAITING_CONFIRMATION
+        if (publish.status() != PublishRequest.Status.REQUESTED
                 || !state.consumeIfEquals(key, publishId.toString())) throw conflict("Publish is not awaiting confirmation");
+        return prepare(session, publish).orElseThrow(() -> conflict("Candidate or live base changed before confirmation"));
+    }
+
+    public synchronized Optional<PublishProject> claim(UUID sessionId, String pluginLease) {
+        EditorSession session = sessions.authenticatePlugin(sessionId, pluginLease); requireCapability(session);
+        PublishRequest publish = metadata.firstPublishRequest(sessionId, PublishRequest.Status.REQUESTED).orElse(null);
+        if (publish == null) return Optional.empty();
+        return prepare(session, publish);
+    }
+
+    private Optional<PublishProject> prepare(EditorSession session, PublishRequest publish) {
         HostedDraft draft = draft(session, publish.draftId());
         String proposed = ContentProjectRevision.compute(draft.files());
-        String proof = state.get(proofKey(publishId)).orElse(null);
+        String proof = state.get(proofKey(publish.id())).orElse(null);
         ContentRevision current = metadata.latestRevisionForSession(session.id()).orElse(null);
         if (!publish.proposedRevision().equals(proposed) || !proposed.equals(proof)
                 || current == null || !publish.baseRevision().equals(current.revision())
                 || !validation.validated(session.id(),draft.id(),proposed)) {
-            reject(publish, session, "candidate-or-base-changed"); throw conflict("Candidate or live base changed before confirmation");
+            reject(publish, session, "candidate-or-base-changed"); return Optional.empty();
         }
         PublishRequest applying = copy(publish, PublishRequest.Status.APPLYING, null, publish.validationResult());
         metadata.savePublishRequest(applying);
-        audit.record(session, AuditEvent.ActorType.OPERATOR, session.initiatorId(), AuditEvent.EventType.PUBLISH,
-                AuditEvent.Outcome.SUCCESS, Map.of("operation", "confirmed", "publish-id", publishId), publishId.toString());
-        return new PublishProject(Protocol.VERSION, publish.id(), session.id(), draft.id(), session.scope(),
-                publish.baseRevision(), publish.proposedRevision(), draft.files());
+        audit.record(session, AuditEvent.ActorType.INSTALLATION, session.installationId().toString(), AuditEvent.EventType.PUBLISH,
+                AuditEvent.Outcome.SUCCESS, Map.of("operation", "claimed", "publish-id", publish.id()), publish.id().toString());
+        return Optional.of(new PublishProject(Protocol.VERSION, publish.id(), session.id(), draft.id(), session.scope(),
+                publish.baseRevision(), publish.proposedRevision(), draft.files()));
     }
 
     public PublishStatusResponse complete(UUID sessionId, UUID publishId, String pluginLease, PublishApplyResult result) {

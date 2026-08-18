@@ -5,8 +5,15 @@ import java.util.*;
 /** Typed, immutable, subscription-scoped runtime state. Values are observational only. */
 public record LiveStateSnapshot(int protocolVersion,UUID subscriptionId,long revision,long capturedAt,boolean full,
                                 List<Player> players,List<Npc> npcs,List<Behavior> behaviors,List<Quest> quests,
-                                List<Dialogue> dialogues,List<Memory> memories,Server server,List<String> removedKeys) {
-    public LiveStateSnapshot { players=copy(players);npcs=copy(npcs);behaviors=copy(behaviors);quests=copy(quests);dialogues=copy(dialogues);memories=copy(memories);removedKeys=copy(removedKeys); }
+                                List<Dialogue> dialogues,List<Memory> memories,List<GraphTrace> traces,
+                                Server server,List<String> removedKeys) {
+    public LiveStateSnapshot { players=copy(players);npcs=copy(npcs);behaviors=copy(behaviors);quests=copy(quests);dialogues=copy(dialogues);memories=copy(memories);traces=copy(traces);removedKeys=copy(removedKeys); }
+    public LiveStateSnapshot(int protocolVersion,UUID subscriptionId,long revision,long capturedAt,boolean full,
+                             List<Player> players,List<Npc> npcs,List<Behavior> behaviors,List<Quest> quests,
+                             List<Dialogue> dialogues,List<Memory> memories,Server server,List<String> removedKeys) {
+        this(protocolVersion,subscriptionId,revision,capturedAt,full,players,npcs,behaviors,quests,dialogues,
+                memories,List.of(),server,removedKeys);
+    }
     private static <T> List<T> copy(List<T> value){return value==null?List.of():List.copyOf(value);}
     public record Player(UUID playerId,String world,List<String> activeQuests,int activeNpcRuntimes){public Player{activeQuests=copy(activeQuests);}}
     public record Npc(String definitionId,String instanceId,Integer citizensActorId,UUID playerId,String presentation,
@@ -33,6 +40,10 @@ public record LiveStateSnapshot(int protocolVersion,UUID subscriptionId,long rev
     }
     public record Memory(UUID playerId,String npcDefinition,String npcInstance,String key,String type,String value,
                          long createdAt,long updatedAt,Long expiresAt,String source,String scope,boolean redacted) {}
+    public record GraphTrace(long sequence,long at,String graphId,String tracepointId,String node,String status,
+                             UUID playerId,String npcInstance,Map<String,String> watchedValues,String detail) {
+        public GraphTrace { watchedValues=watchedValues==null?Map.of():Map.copyOf(watchedValues); }
+    }
     public record Server(long behaviorEvaluations,long behaviorTickNanos,int wakeQueue,long inboxDrops,int persistenceQueue,
                          int activeProjections,int projectionLimit,boolean stale) {}
 }

@@ -2,8 +2,10 @@
 export function createWorkspaceState() {
   return {
     files: new Map(), original: new Map(), selected: null, socket: null, connected: false,
-    connectionGeneration: 0, socketSequence: 0, peerSequence: 0, reconnectAttempt: 0, reconnectTimer: null,
+    connectionGeneration: 0, connectionFailure: null, socketSequence: 0, peerSequence: 0,
+    reconnectAttempt: 0, reconnectTimer: null,
     verified: null, privateKey: null, heartbeat: null, baseRevision: null, currentRevision: null,
+    folders: new Set(), manifestDigest: '',
     draftId: null, autosaveTimer: null, capabilityTimer: null, saving: false, saveAgain: false,
     documentModels: new Map(), originalModels: new Map(), documentValidity: new Map(),
     parseTimer: null, parseGeneration: 0, selectedNode: null,

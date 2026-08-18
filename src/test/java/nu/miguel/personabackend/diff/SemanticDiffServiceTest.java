@@ -16,16 +16,16 @@ class SemanticDiffServiceTest {
     @Test void reportsTypedSemanticChangesAcrossEveryContentFamily() {
         List<ContentFile> before = List.of(
                 file("behaviors/a.yml", "id: demo:a\nroot: {duration: 1}\n"),
-                file("npcs/a.yml", "id: demo:npc\ndisplay-name: Old\n"),
-                file("dialogues/a.yml", "id: demo:talk\nstart: old\n"),
-                file("quests/a.yml", "id: demo:quest\ntitle: Old\n"),
-                file("scripts.yml", "# old\nscripts: {hello: []}\n"));
+                file("npcs/a.yml", "content-version: 2\nid: demo:npc\ndisplay-name: Old\n"),
+                file("dialogues/a.yml", "content-version: 2\nid: demo:talk\nstart: old\n"),
+                file("quests/a.yml", "content-version: 2\nid: demo:quest\ntitle: Old\n"),
+                file("scripts/hello.yml", "# old\ncontent-version: 2\nid: hello\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n"));
         List<ContentFile> after = List.of(
                 file("behaviors/a.yml", "id: demo:a\nroot: {duration: 2}\n"),
-                file("npcs/a.yml", "id: demo:npc\ndisplay-name: New\n"),
-                file("dialogues/a.yml", "id: demo:talk\nstart: new\n"),
-                file("quests/a.yml", "id: demo:quest\ntitle: New\n"),
-                file("scripts.yml", "# changed comment only\nscripts: {hello: []}\n"));
+                file("npcs/a.yml", "content-version: 2\nid: demo:npc\ndisplay-name: New\n"),
+                file("dialogues/a.yml", "content-version: 2\nid: demo:talk\nstart: new\n"),
+                file("quests/a.yml", "content-version: 2\nid: demo:quest\ntitle: New\n"),
+                file("scripts/hello.yml", "# changed comment only\ncontent-version: 2\nid: hello\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n"));
 
         SemanticDiffResponse result = diffs.compare(new SemanticDiffRequest(before, after));
 

@@ -11,6 +11,7 @@ import { fitViewport } from '../../main/resources/static/editor/modules/graph-vi
 import { connectionsForNode } from '../../main/resources/static/editor/modules/graph-connections.js';
 import { boundedResources, resourceMatches } from '../../main/resources/static/editor/modules/content-browser.js';
 import { closeTabsToRight, reorderTabs } from '../../main/resources/static/editor/modules/resource-tabs.js';
+import { inlineDefaultOperation } from '../../main/resources/static/editor/modules/graph-mutations.js';
 
 test('keeps normalized editor domains separate and bounds forged viewport metadata', () => {
   const state = createWorkspaceState();
@@ -50,10 +51,22 @@ test('uses one renderer interface for built-in, custom, and schema-owned nodes a
   assert.deepEqual(renderers.describeNode({ title: 'Wait', kind: 'wait' }).classes, []);
   assert.ok(renderers.describeNode({ title: 'Wave', kind: 'action', extensionOwner: 'vendor' }).badges.includes('vendor'));
   assert.ok(renderers.describeNode({ title: 'Raw', kind: 'custom-yaml', custom: true }).badges.includes('custom data'));
-  assert.deepEqual(renderers.describeNode({ title: 'New line', kind: 'script-say' }),
-    { title: 'Say line', subtitle: 'New line', classes: [], badges: [] });
+  assert.deepEqual(renderers.describeNode({ title: 'line-17', subtitle: 'say', kind: 'script-say' }),
+    { title: 'Say line', subtitle: '', classes: [], badges: [] });
+  assert.equal(renderers.describeNode({ title: 'reward-3', subtitle: 'give-item', kind: 'script-give-item' }).title,
+    'Give Item');
+  assert.equal(renderers.describeNode({ title: 'Input', subtitle: 'demo:flow', kind: 'script-input' }).title, 'Input');
   assert.match(renderers.describePin({ direction: 'input', label: 'in', semanticType: 'execution',
     cardinality: 'single', required: true }).ariaLabel, /required/);
+});
+
+test('uses pin-default mutations for keyed graphs embedded in every resource kind', () => {
+  const pin = { id: 'pin', nodeId: 'node', yamlPath: '/nodes/start/graph/nodes/reward/material' };
+  const dialogue = { resourceKind: 'dialogue', nodes: [{ id: 'node', yamlPath: '/nodes/start/graph/nodes/reward' }] };
+  assert.deepEqual(inlineDefaultOperation(dialogue, pin, 'DIAMOND'),
+    { type: 'SET_PIN_DEFAULT', targetPinId: 'pin', value: 'DIAMOND' });
+  assert.deepEqual(inlineDefaultOperation({ resourceKind: 'behavior', nodes: [{ id: 'node', yamlPath: '/root' }] }, pin, '2s'),
+    { type: 'EDIT_FIELD', yamlPath: pin.yamlPath, value: '2s' });
 });
 
 test('fails closed on unsupported projection protocols and normalizes v3 ports', () => {

@@ -26,7 +26,7 @@ class ProjectOperationServiceTest {
                 new Kind("dialogue", "test:hello", "dialogues/hello.yml"),
                 new Kind("quest", "test:tour", "quests/tour.yml"),
                 new Kind("npc", "test:guide", "npcs/guide.yml"),
-                new Kind("script", "welcome", "scripts.yml"))) {
+                new Kind("script", "welcome", "scripts/welcome.yml"))) {
             var result = operations.create(new ProjectCreateRequest(files, revision(files), item.kind,
                     item.id, item.path, "minimal"));
             files = result.files();
@@ -66,48 +66,41 @@ class ProjectOperationServiceTest {
     }
 
     @Test void duplicatesRenamesAndDeletesReusableScriptsWithoutRewritingNeighbors() {
-        String source = "# scripts header\ncontent-version: 2\nscripts:\n  first:\n"
-                + "    # retain this\n    inputs: {}\n    outputs: {}\n"
-                + "    nodes:\n      say: { type: say, text: 'hello' }\n"
-                + "    connections:\n      enter: { from: $input.exec, to: say.exec }\n"
-                + "      leave: { from: say.success, to: $output.exec }\n"
-                + "  untouched:\n    inputs: {}\n    outputs: {}\n    nodes: {}\n    connections: {}\n";
-        List<ContentFile> files = List.of(file("scripts.yml", source));
+        String source = "# script header\ncontent-version: 2\nid: first\n# retain this\ninputs: {}\noutputs: {}\nvariables: {}\n"
+                + "nodes:\n  say: { type: say, text: 'hello' }\n"
+                + "connections:\n  enter: { from: $input.exec, to: say.exec }\n"
+                + "  leave: { from: say.success, to: $output.exec }\n";
+        String untouched = "content-version: 2\nid: untouched\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n";
+        List<ContentFile> files = List.of(file("scripts/first.yml", source), file("scripts/untouched.yml", untouched));
         var duplicate = operations.duplicate(new ProjectDuplicateRequest(files, revision(files), "script",
-                "first", "second", "scripts.yml"));
-        String withCopy = content(duplicate.files(), "scripts.yml");
-        assertTrue(withCopy.startsWith(source));
-        assertTrue(withCopy.contains("second:"));
+                "first", "second", "scripts/second.yml"));
+        String withCopy = content(duplicate.files(), "scripts/second.yml");
+        assertTrue(withCopy.startsWith("# script header"));
+        assertTrue(withCopy.contains("id: \"second\""));
         assertTrue(withCopy.contains("text: 'hello'"));
+        assertEquals(untouched, content(duplicate.files(), "scripts/untouched.yml"));
 
         var renamed = operations.rename(new ProjectRenameApplyRequest(duplicate.files(), duplicate.revision(),
-                "script", "second", "renamed", false, "scripts.yml"));
-        String withRename = content(renamed.files(), "scripts.yml");
-        assertEquals(withCopy.replace("second:", "renamed:"), withRename);
+                "script", "second", "renamed", true, "scripts/renamed.yml"));
+        String withRename = content(renamed.files(), "scripts/renamed.yml");
+        assertEquals(withCopy.replace("\"second\"", "\"renamed\""), withRename);
 
         var deleted = operations.delete(new ProjectDeleteRequest(renamed.files(), renamed.revision(), "script", "renamed"));
-        assertEquals(source, content(deleted.files(), "scripts.yml"));
+        assertEquals(source, content(deleted.files(), "scripts/first.yml"));
+        assertEquals(untouched, content(deleted.files(), "scripts/untouched.yml"));
     }
 
-    @Test void createsFirstReusableScriptInsideAnExistingEmptyMapping() {
-        List<ContentFile> files = List.of(file("scripts.yml", "# retained\ncontent-version: 2\nscripts: {}\n"));
+    @Test void createsFirstReusableScriptAsAnIndividualFile() {
+        List<ContentFile> files = List.of();
         var result = operations.create(new ProjectCreateRequest(files, revision(files), "script",
-                "welcome", "scripts.yml", "minimal"));
-        assertEquals("# retained\ncontent-version: 2\nscripts: \n  welcome:\n"
-                        + "    inputs: {}\n"
-                        + "    outputs: {}\n"
-                        + "    nodes:\n"
-                        + "      pause: { type: wait, duration: 1ms }\n"
-                        + "    connections:\n"
-                        + "      enter: { from: $input.exec, to: pause.exec }\n"
-                        + "      leave: { from: pause.success, to: $output.exec }\n\n",
-                content(result.files(), "scripts.yml"));
+                "welcome", "scripts/welcome.yml", "minimal"));
+        assertTrue(content(result.files(), "scripts/welcome.yml").startsWith("content-version: 2\nid: welcome\n"));
     }
 
     @Test void guardedDeleteReportsInboundReferencesAndLeavesCandidateUntouched() {
         List<ContentFile> files = List.of(
-                file("dialogues/hello.yml", "id: test:hello\nstart: start\nnodes: { start: { script: [{type: end-dialogue}] } }\n"),
-                file("npcs/guide.yml", "id: test:guide\ndialogues:\n  - id: test:hello\n"));
+                file("dialogues/hello.yml", "content-version: 2\nid: test:hello\nstart: start\nnodes:\n  start:\n    graph:\n      variables: {}\n      nodes: { end: { type: end-dialogue } }\n      connections: { enter: { from: $event.exec, to: end.exec } }\n"),
+                file("npcs/guide.yml", "content-version: 2\nid: test:guide\ndialogues:\n  - id: test:hello\n"));
         ProjectOperationException error = assertThrows(ProjectOperationException.class,
                 () -> operations.delete(new ProjectDeleteRequest(files, revision(files), "dialogue", "test:hello")));
         assertEquals("INBOUND_REFERENCES", error.code());
@@ -119,7 +112,7 @@ class ProjectOperationServiceTest {
 
     @Test void rejectsUnsafeIdsPathsDigestsAndCaseFoldingCollisions() {
         List<ContentFile> collision = List.of(file("npcs/A.yml", "id: test:a\n"), file("npcs/a.yml", "id: test:b\n"));
-        assertCode("PATH_COLLISION", () -> rules.verify(collision, revision(collision)));
+        assertCode("INVALID_PATH", () -> rules.verify(collision, revision(collision)));
         assertCode("INVALID_ID", () -> operations.create(new ProjectCreateRequest(List.of(), revision(List.of()),
                 "npc", "../escape", "npcs/escape.yml", "minimal")));
         assertCode("INVALID_PATH", () -> operations.create(new ProjectCreateRequest(List.of(), revision(List.of()),
@@ -138,19 +131,18 @@ class ProjectOperationServiceTest {
     }
 
     @Test void extractsAnExactCommandToAReusableScriptAndLeavesAReferenceInOneAtomicCandidate() {
-        String dialogue = "# retained\nid: test:hello\nstart: start\nnodes:\n  start:\n    script:\n"
-                + "      - type: say # command comment\n        text: 'Exact text'\n        vendor: !custom tagged\n"
-                + "      - type: end-dialogue\n";
+        String dialogue = "# retained\ncontent-version: 2\nid: test:hello\nstart: start\nnodes:\n  start:\n    graph:\n"
+                + "      variables: {}\n      nodes:\n        say: # command comment\n          type: say\n          text: 'Exact text'\n          vendor: !custom tagged\n"
+                + "        end: { type: end-dialogue }\n      connections:\n        enter: { from: $event.exec, to: say.exec }\n        finish: { from: say.success, to: end.exec }\n";
         List<ContentFile> files = List.of(file("dialogues/hello.yml", dialogue));
         ProjectOperationResponse result = operations.extractScript(new ProjectExtractScriptRequest(files,
-                revision(files), "dialogues/hello.yml", "/nodes/start/script/0", "greeting"));
+                revision(files), "dialogues/hello.yml", "/nodes/start/graph/nodes/say", "greeting"));
         String updated = content(result.files(), "dialogues/hello.yml");
         assertTrue(updated.startsWith("# retained\n"));
-        assertTrue(updated.contains("- type: run-script\n        script: greeting"));
-        assertTrue(updated.contains("- type: end-dialogue"));
-        String scripts = content(result.files(), "scripts.yml");
-        assertTrue(scripts.contains("greeting:"));
-        assertTrue(scripts.contains("type: say # command comment"));
+        assertTrue(updated.contains("type: run-script\n          script: greeting"));
+        assertTrue(updated.contains("end: { type: end-dialogue }"));
+        String scripts = content(result.files(), "scripts/greeting.yml");
+        assertTrue(scripts.contains("id: greeting"));
         assertTrue(scripts.contains("text: 'Exact text'"));
         assertTrue(scripts.contains("vendor: !custom tagged"));
         assertTrue(references.analyze(result.files()).references().stream().anyMatch(reference ->
@@ -174,24 +166,95 @@ class ProjectOperationServiceTest {
 
     @Test void atomicallyCreatesAndRepairsAnyTypedScalarReference() {
         List<ContentFile> files = List.of(file("dialogues/guide.yml",
-                "id: test:guide\nstart: hello\nnodes:\n  hello:\n    script:\n      - type: run-script\n        script: missing-script # keep\n"));
+                "content-version: 2\nid: test:guide\nstart: hello\nnodes:\n  hello:\n    graph:\n      variables: {}\n      nodes:\n        call:\n          type: run-script\n          script: missing-script # keep\n          inputs: {}\n      connections: {}\n"));
         ProjectOperationResponse result = operations.createAndAssign(new ProjectCreateAndAssignRequest(files,
                 revision(files), "dialogues/guide.yml", "typed-reference", "missing-script",
-                "/nodes/hello/script/0/script", "script"));
+                "/nodes/hello/graph/nodes/call/script", "script"));
         assertTrue(content(result.files(), "dialogues/guide.yml").contains("script: missing-script # keep"));
-        assertTrue(result.files().stream().anyMatch(file -> file.path().equals("scripts.yml")
-                && file.content().contains("missing-script:")));
+        assertTrue(result.files().stream().anyMatch(file -> file.path().equals("scripts/missing-script.yml")
+                && file.content().contains("id: missing-script")));
         assertTrue(references.analyze(result.files()).references().stream().allMatch(reference -> reference.resolved()));
     }
 
     @Test void rejectsAnInvalidCompleteCandidateWithoutReturningPartialChanges() {
-        List<ContentFile> files = List.of(file("other/broken.yml", "value: [\n"));
+        List<ContentFile> files = List.of(file("npcs/broken.yml", "value: [\n"));
         ProjectOperationException error = assertThrows(ProjectOperationException.class,
                 () -> operations.create(new ProjectCreateRequest(files, revision(files), "npc",
                         "test:guide", "npcs/guide.yml", "minimal")));
         assertEquals("INVALID_PROJECT_YAML", error.code());
-        assertEquals("other/broken.yml", error.filePath());
+        assertEquals("npcs/broken.yml", error.filePath());
         assertEquals(1, files.size());
+    }
+
+    @Test void extractionPromotesCrossingDataWiresToTypedReusableBoundaries() {
+        String script = "content-version: 2\nid: flow\ninputs:\n  text: { type: text, required: true }\n"
+                + "outputs: {}\nvariables: {}\nnodes:\n  say: { type: say, text: fallback }\n"
+                + "  end: { type: stop }\nconnections:\n  enter: { from: $input.exec, to: say.exec }\n"
+                + "  message: { from: $input.text, to: say.text }\n"
+                + "  finish: { from: say.success, to: end.exec }\n";
+        List<ContentFile> files = List.of(file("scripts/flow.yml", script));
+        ProjectOperationResponse result = operations.extractScript(new ProjectExtractScriptRequest(files,
+                revision(files), "scripts/flow.yml", "/nodes/say", "extracted-say"));
+        String caller = content(result.files(), "scripts/flow.yml");
+        String extracted = content(result.files(), "scripts/extracted-say.yml");
+        assertTrue(caller.contains("say:\n    type: run-script\n    script: extracted-say"));
+        assertTrue(caller.contains("message: { from: $input.text, to: say.text }"));
+        assertTrue(extracted.contains("inputs:\n  text: { type: text, required: true }"));
+        assertTrue(extracted.contains("input-text: { from: $input.text, to: say.text }"));
+    }
+
+    @Test void extractionCollapsesASelectionAndPreservesOnlyItsInternalWires() {
+        String script = "content-version: 2\nid: flow\ninputs:\n  text: { type: text, required: true }\n"
+                + "outputs: {}\nvariables: {}\nnodes:\n  say: { type: say, text: fallback }\n"
+                + "  pause: { type: wait, duration: 1 }\n  end: { type: stop }\nconnections:\n"
+                + "  enter: { from: $input.exec, to: say.exec }\n"
+                + "  message: { from: $input.text, to: say.text }\n"
+                + "  leave: { from: say.success, to: pause.exec }\n"
+                + "  finish: { from: pause.success, to: end.exec }\n";
+        List<ContentFile> files = List.of(file("scripts/flow.yml", script));
+        ProjectOperationResponse result = operations.extractScript(new ProjectExtractScriptRequest(files,
+                revision(files), "scripts/flow.yml", "/nodes/say", List.of("/nodes/say", "/nodes/pause"),
+                "extracted-flow"));
+        String caller = content(result.files(), "scripts/flow.yml");
+        String extracted = content(result.files(), "scripts/extracted-flow.yml");
+        assertTrue(caller.contains("say:\n    type: run-script\n    script: extracted-flow"));
+        assertFalse(caller.contains("pause: { type: wait"));
+        assertFalse(caller.contains("leave: { from: say.success, to: pause.exec }"));
+        assertTrue(caller.contains("finish: { from: \"say.success\", to: end.exec }"), caller);
+        assertTrue(extracted.contains("say: { type: say, text: fallback }"));
+        assertTrue(extracted.contains("pause: { type: wait, duration: 1 }"));
+        assertTrue(extracted.contains("leave: { from: say.success, to: pause.exec }"));
+        assertTrue(extracted.contains("enter: { from: $input.exec, to: say.exec }"));
+        assertTrue(extracted.contains("leave-2: { from: pause.success, to: $output.exec }"));
+    }
+
+    @Test void folderManifestOperationsAreAtomicDigestGuardedAndMoveNestedResources() {
+        List<ContentFile> files=List.of();String manifestDigest=ProjectPathRules.sha256("");
+        ProjectOperationResponse parent=operations.createFolder(new ProjectCreateFolderRequest(files,revision(files),manifestDigest,"npcs/town"));
+        files=parent.files();manifestDigest=ProjectPathRules.manifest(files).digest();
+        ProjectOperationResponse child=operations.createFolder(new ProjectCreateFolderRequest(files,parent.revision(),manifestDigest,"npcs/town/shops"));
+        files=child.files();
+        ProjectOperationResponse created=operations.create(new ProjectCreateRequest(files,child.revision(),"npc","test:merchant","npcs/town/shops/merchant.yml","minimal"));
+        manifestDigest=ProjectPathRules.manifest(created.files()).digest();
+        ProjectOperationResponse moved=operations.moveFolder(new ProjectMoveFolderRequest(created.files(),created.revision(),manifestDigest,"npcs/town","npcs/village"));
+        assertTrue(moved.files().stream().anyMatch(file->file.path().equals("npcs/village/shops/merchant.yml")));
+        assertEquals(Set.of("npcs/village","npcs/village/shops"),ProjectPathRules.manifest(moved.files()).folders());
+        ProjectDeleteFolderRequest delete=new ProjectDeleteFolderRequest(moved.files(),moved.revision(),ProjectPathRules.manifest(moved.files()).digest(),"npcs/village");
+        assertTrue(operations.previewFolderDeletion(delete).allowed());
+        ProjectOperationResponse deleted=operations.deleteFolder(delete);
+        assertTrue(deleted.files().stream().noneMatch(file->file.path().startsWith("npcs/village/")));
+        assertCode("STALE_MANIFEST",()->operations.createFolder(new ProjectCreateFolderRequest(deleted.files(),deleted.revision(),"0".repeat(64),"npcs/stale")));
+    }
+
+    @Test void folderDeletePreviewReportsExternalTypedReferences() {
+        String manifest=ProjectPathRules.renderManifest(Set.of("dialogues/story"));
+        List<ContentFile> files=List.of(file(ProjectPathRules.MANIFEST_PATH,manifest),
+                file("dialogues/story/hello.yml","content-version: 2\nid: test:hello\nstart: start\nnodes:\n  start:\n    graph:\n      variables: {}\n      nodes: { end: { type: end-dialogue } }\n      connections: { enter: { from: $event.exec, to: end.exec } }\n"),
+                file("npcs/guide.yml","content-version: 2\nid: test:guide\ndialogues:\n  - { id: test:hello }\n"));
+        ProjectDeleteFolderRequest request=new ProjectDeleteFolderRequest(files,revision(files),ProjectPathRules.manifest(files).digest(),"dialogues/story");
+        ProjectFolderDeletePreview preview=operations.previewFolderDeletion(request);
+        assertFalse(preview.allowed());assertEquals(1,preview.blockingReferences().size());
+        assertCode("INBOUND_REFERENCES",()->operations.deleteFolder(request));
     }
 
     private static void assertCode(String expected, Runnable operation) {

@@ -4,26 +4,29 @@ import { deriveResources, kindForPath } from '../../main/resources/static/editor
 import { normalizeLayout } from '../../main/resources/static/editor/modules/layout-store.js';
 import { deterministicLayout, normalizeViewport } from '../../main/resources/static/editor/modules/graph-layout.js';
 
-test('groups all Persona content kinds and exposes each reusable script independently', () => {
+test('groups all Persona content kinds and exposes individual reusable-script files', () => {
   const files = new Map([
     ['npcs/guide.yml', 'id: village:guide\ndisplay-name: "Village Guide"\nplayer-behavior: village:walk\n'],
     ['dialogues/hello.yml', 'id: village:hello\nstart: start\nnodes: {}\n'],
     ['quests/tour.yml', 'id: village:tour\ntitle: "Village Tour"\nphases: []\n'],
     ['behaviors/walk.yml', 'id: village:walk\nscope: player\nroot: {}\n'],
-    ['scripts.yml', 'scripts:\n  welcome:\n    - type: stop\n  farewell:\n    - type: stop\n'],
+    ['scripts/welcome.yml', 'content-version: 2\nid: welcome\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n'],
+    ['scripts/nested/farewell.yml', 'content-version: 2\nid: farewell\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n'],
     ['extensions/custom.yaml', 'vendor: !custom value\n']
   ]);
   const resources = deriveResources(files);
   assert.deepEqual(resources.map(item => item.kind),
     ['npc', 'dialogue', 'quest', 'behavior', 'script', 'script', 'other']);
   assert.equal(resources.find(item => item.id === 'village:guide').label, 'Village Guide');
-  assert.equal(resources.find(item => item.id === 'welcome').yamlPath, '/scripts/welcome');
+  assert.equal(resources.find(item => item.id === 'welcome').yamlPath, '');
   assert.match(resources.find(item => item.id === 'village:guide').search, /village:walk/);
 });
 
 test('path classification never guesses unsupported YAML as a Persona resource', () => {
   assert.equal(kindForPath('behaviors/a.yml'), 'behavior');
-  assert.equal(kindForPath('scripts.yml'), 'script');
+  assert.equal(kindForPath('scripts/a.yml'), 'script');
+  assert.equal(kindForPath('scripts/nested/a.yml'), 'script');
+  assert.equal(kindForPath('scripts.yml'), 'other');
   assert.equal(kindForPath('vendor/data.yml'), 'other');
   assert.equal(kindForPath('behaviors-not/a.yml'), 'other');
 });

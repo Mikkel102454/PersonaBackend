@@ -79,6 +79,7 @@ export class GraphLayoutStore {
       const colors = Object.fromEntries(Object.entries(value.colors || {})
         .filter(([id, color]) => ids.has(id) && /^#[0-9a-f]{6}$/i.test(color)).slice(0, 2000));
       const edgeIds = new Set((projection.edges || []).map(edge => edge.id));
+      const pinIds = new Set(projection.nodes.flatMap(node => (node.pins || []).map(pin => pin.id)));
       let rerouteCount = 0;
       const reroutes = Object.fromEntries(Object.entries(value.reroutes || {}).filter(([edgeId, points]) =>
         edgeIds.has(edgeId) && Array.isArray(points)).map(([edgeId, points]) => [edgeId, points.filter(point =>
@@ -89,7 +90,9 @@ export class GraphLayoutStore {
         comments, groups, reroutes,
         bookmarks: Array.isArray(value.bookmarks) ? value.bookmarks.filter(id => ids.has(id)).slice(0, 200) : [],
         colors,
-        collapsed: Array.isArray(value.collapsed) ? value.collapsed.filter(id => ids.has(id)).slice(0, 2000) : [] };
+        collapsed: Array.isArray(value.collapsed) ? value.collapsed.filter(id => ids.has(id)).slice(0, 2000) : [],
+        tracepoints: Array.isArray(value.tracepoints) ? value.tracepoints.filter(id => ids.has(id)).slice(0, 500) : [],
+        watchedPins: Array.isArray(value.watchedPins) ? value.watchedPins.filter(id => pinIds.has(id)).slice(0, 500) : [] };
     } catch { return null; }
   }
   async save(projection, layout) {
@@ -101,6 +104,7 @@ export class GraphLayoutStore {
       viewport: normalizeViewport(layout.viewport), comments: layout.comments || [], groups: layout.groups || [],
       reroutes: layout.reroutes || {},
       bookmarks: layout.bookmarks || [], colors: layout.colors || {}, collapsed: layout.collapsed || [],
+      tracepoints: layout.tracepoints || [], watchedPins: layout.watchedPins || [],
       savedAt: Date.now() };
     try {
       const database = await this.open();

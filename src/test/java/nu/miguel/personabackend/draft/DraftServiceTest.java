@@ -4,6 +4,7 @@ import nu.miguel.persona.editor.protocol.*;
 import nu.miguel.personabackend.session.EditorProperties;
 import nu.miguel.personabackend.session.SessionService;
 import nu.miguel.personabackend.snapshot.SnapshotService;
+import nu.miguel.personabackend.project.ProjectPathRules;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -58,23 +59,23 @@ class DraftServiceTest {
                 Set.of(Capability.CONTENT_VIEW, Capability.DRAFT_EDIT));
         Instant initialTime = Instant.now();
         ContentSnapshot initial = snapshot(installation, first.created().sessionId(),
-                "scripts.yml", "scripts: {}\n", initialTime);
+                "scripts/work.yml", "content-version: 2\nid: work\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n", initialTime);
         snapshots.store(first.created().sessionId(), first.created().pluginLeaseToken(), initial);
         UUID draftId = UUID.randomUUID();
         drafts.save(first.created().sessionId(), draftId, first.verified().browserLeaseToken(),
-                new DraftSaveRequest(Protocol.VERSION, initial.revision(), List.of(file("scripts.yml", "# work\nscripts: {}\n"))));
+                new DraftSaveRequest(Protocol.VERSION, initial.revision(), List.of(file("scripts/work.yml", "# work\ncontent-version: 2\nid: work\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n"))));
 
         Session second = session(installation, installationId, "console",
                 Set.of(Capability.CONTENT_VIEW));
         ContentSnapshot changed = snapshot(installation, second.created().sessionId(),
-                "scripts.yml", "scripts:\n  new: []\n", initialTime.plusSeconds(1));
+                "scripts/work.yml", "content-version: 2\nid: work\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: { new: { type: stop } }\nconnections: {}\n", initialTime.plusSeconds(1));
         snapshots.store(second.created().sessionId(), second.created().pluginLeaseToken(), changed);
 
         DraftResponse stale = drafts.read(first.created().sessionId(), draftId, first.verified().browserLeaseToken());
         assertTrue(stale.stale());
         assertEquals(initial.revision(), stale.baseRevision());
         assertEquals(changed.revision(), stale.currentRevision());
-        assertEquals("# work\nscripts: {}\n", stale.files().getFirst().content());
+        assertTrue(stale.files().getFirst().content().startsWith("# work\ncontent-version: 2"));
     }
 
     @Test void marksDraftStaleWhenItsOwnLiveSessionReloadsContent() throws Exception {
@@ -83,14 +84,14 @@ class DraftServiceTest {
                 Set.of(Capability.CONTENT_VIEW, Capability.DRAFT_EDIT));
         Instant initialTime = Instant.now();
         ContentSnapshot initial = snapshot(installation, session.created().sessionId(),
-                "scripts.yml", "scripts: {}\n", initialTime);
+                "scripts/work.yml", "content-version: 2\nid: work\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n", initialTime);
         snapshots.store(session.created().sessionId(), session.created().pluginLeaseToken(), initial);
         UUID draftId = UUID.randomUUID();
         drafts.save(session.created().sessionId(), draftId, session.verified().browserLeaseToken(),
-                new DraftSaveRequest(Protocol.VERSION, initial.revision(), List.of(file("scripts.yml", "# editing\nscripts: {}\n"))));
+                new DraftSaveRequest(Protocol.VERSION, initial.revision(), List.of(file("scripts/work.yml", "# editing\ncontent-version: 2\nid: work\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n"))));
 
         ContentSnapshot reloaded = snapshot(installation, session.created().sessionId(),
-                "scripts.yml", "scripts:\n  live: []\n", initialTime.plusSeconds(1));
+                "scripts/work.yml", "content-version: 2\nid: work\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: { live: { type: stop } }\nconnections: {}\n", initialTime.plusSeconds(1));
         assertEquals(reloaded.revision(), snapshots.store(
                 session.created().sessionId(), session.created().pluginLeaseToken(), reloaded).revision());
 
@@ -126,25 +127,25 @@ class DraftServiceTest {
         KeyPair installation = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
         Session session = session(installation, UUID.randomUUID(), "patch-author",
                 Set.of(Capability.CONTENT_VIEW, Capability.DRAFT_EDIT));
-        String original = "# base comment\nscripts: {}\n";
-        ContentSnapshot base = snapshot(installation, session.created().sessionId(), "scripts.yml", original, Instant.now());
+        String original = "# base comment\ncontent-version: 2\nid: work\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n";
+        ContentSnapshot base = snapshot(installation, session.created().sessionId(), "scripts/work.yml", original, Instant.now());
         snapshots.store(session.created().sessionId(), session.created().pluginLeaseToken(), base);
-        String changed = "# base comment\nscripts:\n  hello: []\n";
+        String changed = "# base comment\ncontent-version: 2\nid: work\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: { hello: { type: stop } }\nconnections: {}\n";
         UUID draftId = UUID.randomUUID();
 
         DraftResponse patched = drafts.patch(session.created().sessionId(), draftId,
                 session.verified().browserLeaseToken(), new DraftPatchRequest(Protocol.VERSION, base.revision(),
-                        List.of(new DraftPatchFile("scripts.yml", base.files().getFirst().sha256(), changed,
-                                file("scripts.yml", changed).sha256()))));
+                        List.of(new DraftPatchFile("scripts/work.yml", base.files().getFirst().sha256(), changed,
+                                file("scripts/work.yml", changed).sha256()))));
 
         assertEquals(changed, patched.files().getFirst().content());
         assertThrows(ResponseStatusException.class, () -> drafts.patch(session.created().sessionId(), UUID.randomUUID(),
                 session.verified().browserLeaseToken(), new DraftPatchRequest(Protocol.VERSION, base.revision(),
-                        List.of(new DraftPatchFile("scripts.yml", "0".repeat(64), changed,
-                                file("scripts.yml", changed).sha256())))));
+                        List.of(new DraftPatchFile("scripts/work.yml", "0".repeat(64), changed,
+                                file("scripts/work.yml", changed).sha256())))));
         DraftResponse deleted = drafts.patch(session.created().sessionId(), draftId,
                 session.verified().browserLeaseToken(), new DraftPatchRequest(Protocol.VERSION, base.revision(),
-                        List.of(new DraftPatchFile("scripts.yml", base.files().getFirst().sha256(), null, null))));
+                        List.of(new DraftPatchFile("scripts/work.yml", base.files().getFirst().sha256(), null, null))));
         assertTrue(deleted.files().isEmpty());
     }
 
@@ -175,11 +176,12 @@ class DraftServiceTest {
         MessageDigest aggregate = MessageDigest.getInstance("SHA-256");
         aggregate.update(path.getBytes(StandardCharsets.UTF_8)); aggregate.update((byte) 0);
         aggregate.update(file.sha256().getBytes(StandardCharsets.US_ASCII)); aggregate.update((byte) 0);
-        ContentSnapshot unsigned = new ContentSnapshot(Protocol.VERSION, sessionId, hex(aggregate.digest()), 1,
-                createdAt, Base64.getEncoder().encodeToString(keys.getPublic().getEncoded()), List.of(file), "");
+        ContentSnapshot unsigned = new ContentSnapshot(Protocol.VERSION, sessionId, hex(aggregate.digest()), 2,
+                createdAt, Base64.getEncoder().encodeToString(keys.getPublic().getEncoded()), List.of(file),
+                Set.of(), ProjectPathRules.sha256(""), "");
         return new ContentSnapshot(unsigned.protocolVersion(), unsigned.sessionId(), unsigned.revision(),
                 unsigned.contentFormatVersion(), unsigned.createdAt(), unsigned.installationPublicKey(), unsigned.files(),
-                sign(keys.getPrivate(), unsigned.signingInput()));
+                unsigned.folders(), unsigned.manifestDigest(), sign(keys.getPrivate(), unsigned.signingInput()));
     }
 
     private static ContentFile file(String path, String content) throws Exception {

@@ -18,7 +18,7 @@ import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.Mockito.*;
 
 class EditorFoundationHttpTest {
-    @Test void connectedHostedEditorExposesRecoveryHistoryPaletteDiffAndExportControls() throws Exception {
+    @Test void connectedHostedEditorExposesRecoveryHistoryPaletteAndDiffControls() throws Exception {
         UUID sessionId = UUID.randomUUID();
         SessionService sessions = mock(SessionService.class);
         RelayHub relay = mock(RelayHub.class);
@@ -31,8 +31,10 @@ class EditorFoundationHttpTest {
         }
         assertEquals("no-store", response.getHeaders().getCacheControl());
         for (String id : java.util.List.of("undo", "redo", "copy", "paste", "palette", "diff",
-                "export-all", "export-changed", "live-open", "live-dialog", "live-players", "live-behaviors",
+                "live-open", "live-dialog", "live-players", "live-behaviors",
                 "reconnect", "reconnect-now")) assertTrue(page.contains("id=\"" + id + "\""), id);
+        assertFalse(page.contains("id=\"export-all\""));
+        assertFalse(page.contains("id=\"export-changed\""));
         assertFalse(page.contains("offline"));
         assertFalse(page.contains("id=\"import"));
         String script;
@@ -41,7 +43,7 @@ class EditorFoundationHttpTest {
             script = new String(stream.readAllBytes(), StandardCharsets.UTF_8);
         }
         for (String function : java.util.List.of("restoreHistory", "scheduleRecovery", "renderDiff",
-                "openPalette", "exportProject", "loadEditorMetadata", "extensionSchemaFor", "schemaInput",
+                "openPalette", "loadEditorMetadata", "extensionSchemaFor", "schemaInput",
                 "requestCatalog", "receiveCatalogResult","subscribeLive","applyLiveSnapshot","renderLive"))
             assertTrue(script.contains("function " + function), function);
         for(String annotation:java.util.List.of("x-persona-widget","x-persona-catalog"))assertTrue(script.contains(annotation),annotation);

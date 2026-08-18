@@ -13,10 +13,10 @@ available. No canvas coordinate is a content identity.
 | YAML construct | Graph projection | Pins/edges | Inspector | Allowed lossless operations |
 | --- | --- | --- | --- | --- |
 | `behaviors/*.{yml,yaml}` | Behaviour resource + root node | root `execute` | `content-version`, `id`, `scope` | scalar edit; root wrap/replace; atomic rename/move/delete |
-| `dialogues/*.{yml,yaml}` | Dialogue resource + entry nodes | start and transfer edges | `content-version`, `id`, `start` | scalar edit; add/remove/reorder script; entry create/delete; rename |
-| `quests/*.{yml,yaml}` | Quest resource + ordered phase flow | entry, branch, implicit-next, complete | root fields and hooks | scalar edit; phase/objective/script structural patches; rename |
+| `dialogues/*.{yml,yaml}` | Dialogue resource + entry graphs | start and transfer edges | `content-version`, `id`, `start` | keyed graph edits; entry create/delete; rename |
+| `quests/*.{yml,yaml}` | Quest resource + ordered phase flow | entry, branch, implicit-next, complete | root fields and hooks | scalar edit; phase/objective/graph structural patches; rename |
 | `npcs/*.{yml,yaml}` | Central NPC overview | typed reference/containment edges | root presentation fields | scalar edit; list/map patches; reference assignment; rename |
-| `scripts.yml#/scripts/{id}` | Explicit typed graph with synthetic Input/Output boundaries | execution and nominal data wires | signature, defaults, callers | keyed node/wire patches; atomic parameter create/rename/reorder/type/delete |
+| `scripts/**/*.yml` | One explicit typed graph per file with synthetic Input/Output boundaries | execution and nominal data wires | signature, variables, defaults, callers | keyed node/wire patches; atomic parameter/variable changes |
 | unrecognized YAML file | Custom YAML resource | reference edges only when typed by server | raw range | raw YAML edit only |
 
 ## Behaviour nodes
@@ -73,13 +73,13 @@ Behaviour action discriminators and fields:
 | `command` | `command` plus the selected command's fields |
 | namespaced extension action | signed schema fields plus scope/durable metadata |
 
-## Script steps and reusable graphs
+## Shared event and reusable graphs
 
-Inline scripts occur in dialogue entries, NPC hooks, quest/phase/objective hooks, command
-handlers, and choice/random branches. Their ordered list position is semantic. Reusable scripts are
-different: `scripts.yml` must declare `content-version: 2`, and every script is an explicit
-`inputs`/`outputs`/`nodes`/`connections` descriptor. Older reusable-script lists are rejected with a
-migration diagnostic; the editor never guesses a conversion.
+NPC events, dialogue nodes, and quest/phase/objective lifecycle hooks use explicit
+`variables`/`nodes`/`connections` descriptors with a typed `$event` boundary. Each file below
+`scripts/` is one content-version 2 reusable graph and adds `inputs`/`outputs` with `$input` and
+`$output` boundaries. Old lists and monolithic `scripts.yml` are rejected; the editor never guesses
+a conversion.
 
 Graph contract v3 exposes `channel` (`EXECUTION` or `DATA`), exact nominal `valueType`, direction,
 cardinality, required state, stable order, source range, inline literal/default metadata, connected
@@ -88,24 +88,30 @@ are triangular and data pins are circular. Data wires require exact nominal type
 converter nodes are the only coercion. Input and Output boundary cards are synthetic and cannot be
 deleted. A `run-script` card derives typed inputs and outputs from its target signature.
 
-Signature rename and deletion update the declaration, boundary wires, every `run-script.inputs`
+Signature rename and deletion update the declaration, boundary wires, every `run-script` caller
 binding, and caller data endpoints in one revision. Reorder preserves mapping entry bytes. Type
 changes fail closed while incompatible wires remain. Unknown fields, comments, quoting, tags, and
 neighboring scripts remain byte-for-byte unchanged by bounded mutations.
 
-| Step | Card/pins | Fields and nested graphs | Mutations |
+| Node type | Execution/data pins | Fields | Mutations |
 | --- | --- | --- | --- |
-| `say` | line node, `next` | one of `text`, `text-key`, `variants`; optional `translations`, `delay`; variant `text`, `weight` | scalar/list patch |
-| `if` | condition input; `then`, `else`, `next` | `when`; nested `then`/`else` scripts | connect branch; insert/move/wrap/delete |
-| `choice` | one labeled output per option; `next` | option `text`, optional `when`, nested `script` | option insert/reorder/delete; branch connect |
-| `goto` | transfer/reference output | `node`; or `dialogue` and optional `node` | reconnect target; scalar patch |
-| `end-dialogue` | terminal | none | insert/move/delete |
-| `stop` | terminal | none | insert/move/delete |
-| `wait` | `next` | `duration` | scalar/list patch |
-| `random` | weighted output per option; `next` | option `weight`, nested `script` | option insert/reorder/delete; branch connect |
-| `run-script` | script-reference output; `next` | `script` | assign/create/open target; scalar/list patch |
-| built-in command | `success`, `failure`, `next` | command fields; nested `on-success`, `on-failure` | scalar and nested list patches |
-| namespaced command | same as command | signed schema fields and handlers | schema/capability-approved patches |
+| `say`, `wait` | `exec` → `success`/`failure`; typed value inputs | text/localization/delay or duration | scalar edit, connect, replace, duplicate, delete |
+| `branch` | `exec`; boolean `condition`; `true`/`false` | optional disconnected boolean default | connect either explicit branch; replace/delete |
+| `sequence` | `exec`; ordered execution outputs; `completed` | bounded output count | connect/reconnect outputs; replace/delete |
+| `switch` | `exec`; typed value; keyed cases; default | exact `value-type` and cases | case edits plus explicit wires |
+| `random` | `exec`; weighted outputs; `completed` | bounded weights | weight edits plus explicit wires |
+| `gate` | `exec`, `open`, `close`, `toggle`; `exit`/`closed` | initial state and NPC/player scope | connect/reset state; replace/delete |
+| `do-once`, `do-n` | `exec`, `reset`; completed/skipped or exhausted | scope; bounded `n` for Do N | connect/reset state; replace/delete |
+| `for`, `for-each`, `while` | `exec`; loop body/completed; typed index/item values | bounds/list/condition; 10,000-iteration ceiling | exact data/execution wires; replace/delete |
+| `get-variable`, `set-variable` | typed value and optional execution pins | execution-local variable name | promote/rename/retype/delete through authoritative variable operations |
+| persistent flag/string/NPC-memory getters and setters | exact typed values; setters have execution pins | key/name, scope, value | scalar edit and exact connections |
+| `value` and converter nodes | pure typed outputs; converter input/result | exact literal/type | inline default edit, connect, remove; safe converters only |
+| `goto` | `exec`; transfer control | local node, or dialogue plus node | scalar patch/open target; dialogue graphs only |
+| `end-dialogue`, `stop` | `exec`; terminal | none | insert/move/delete in valid host graphs |
+| `choice` | `exec`; one execution output per declared option | option labels and conditions are data, never nested scripts | option edit and explicit output wires |
+| `run-script` | `exec` → `success`/`failure`; signature-derived exact data pins | individual script ID plus disconnected literal inputs | assign/create/open target; typed connection and signature operations |
+| built-in command | `exec` → `success`/`failure`; command-specific data pins | command fields | scalar edit and explicit success/failure wires |
+| namespaced command | schema-declared execution/data pins | signed schema fields | schema/capability-approved patches only |
 
 Built-in command fields:
 
@@ -138,9 +144,9 @@ condition table except that script conditions do not provide native event/memory
 | YAML path | Projection | Fields/pins | Mutations |
 | --- | --- | --- | --- |
 | `/start` | distinguished Start edge | entry ID | Set as start scalar patch |
-| `/nodes/{nodeId}` | dialogue-entry card | semantic stable key; script containment | create/rename/delete entry; open nested script |
-| `/nodes/{nodeId}/script` | ordered script graph | entry and next flow | script operations above |
-| `goto` within any nested script | transfer wire | local node or external dialogue/node | reconnect with existence/cycle diagnostics |
+| `/nodes/{nodeId}` | dialogue-entry card | semantic stable key; graph containment | create/rename/delete entry; open nested graph |
+| `/nodes/{nodeId}/graph` | typed event graph | `$event` entry, explicit execution/data flow | shared graph operations above |
+| `goto` within any nested graph | transfer wire | local node or external dialogue/node | reconnect with existence/cycle diagnostics |
 
 Advisory analysis adds missing target, unreachable, implicit end, and transfer-loop
 diagnostics. Persona validation remains authoritative.
@@ -150,13 +156,13 @@ diagnostics. Persona validation remains authoritative.
 | YAML construct | Projection | Fields/pins | Mutations |
 | --- | --- | --- | --- |
 | quest root | resource/entry | `id`, `title`, `description`, `when`, `repeatable`, `cooldown`, `maximum-completions`, `time-limit` | scalar edit/rename |
-| `on-start`, `on-complete`, `on-fail`, `on-reset` | nested script graph | lifecycle edge | script operations |
+| `on-start`, `on-complete`, `on-fail`, `on-reset` | typed event graph | lifecycle edge | shared graph operations |
 | `phases[]` | ordered phase card | `id`, `title`, `description`; implicit-next pin | insert/reorder/duplicate/delete/scalar edit |
 | phase `branches[]` | conditional edge | `when`, `next-phase` | insert/reorder/delete/reconnect |
-| phase `on-start`, `on-complete` | nested script graph | lifecycle edge | script operations |
+| phase `on-start`, `on-complete` | typed event graph | lifecycle edge | shared graph operations |
 | `objectives[]` | objective card | common and type fields; required/optional state | insert/reorder/duplicate/delete/scalar edit |
-| objective hooks | nested script graph | start/progress/complete | script operations |
-| `on-progress` | progress hook | `every`, `script` | scalar/script operations |
+| objective hooks | typed event graph | start/progress/complete | shared graph operations |
+| `on-progress` | progress hook | `every`, `graph` | scalar/graph operations |
 
 Objective fields common to built-ins are `id`, `title`, `description`, `type`,
 `amount`, `optional`, `hidden`, `on-start`, `on-progress`, and `on-complete`.
@@ -179,7 +185,8 @@ Objective fields common to built-ins are `id`, `title`, `description`, `type`,
 | `player-behavior` | behaviour reference card | player-only reference pin | assign/create/open/clear |
 | `dialogues[]` | ordered dialogue reference cards | `id`, `priority`, optional `when` | insert/reorder/delete/assign/create/open |
 | `anchors/{name}` | anchor card/map point | `world`, `x`, `y`, `z`, `yaw`, `pitch` | field edit/create/rename/delete |
-| `on-interact`, `on-no-dialogue` | nested script graphs | lifecycle edge | script operations |
+| `on-click`, `on-damage`, `on-spawn`, `on-despawn`, `on-no-dialogue` | permanent typed event graphs | host event pins and execution | shared graph operations |
+| `signals/{name}/graph` | named local event graph | declared typed signal parameters | shared graph operations |
 
 Presentation properties supplied by signed extension schemas use schema-generated
 inspector controls and remain custom YAML when the schema is absent or invalid.

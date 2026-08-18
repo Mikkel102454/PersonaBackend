@@ -100,7 +100,7 @@ class EditorLeaseAuthenticationFilterTest {
         verify(relay, times(6)).connected(RelaySocketHandler.Role.PLUGIN, id);
     }
 
-    @Test void separatesBrowserPublishRequestFromPluginConfirmationAndResult() throws Exception {
+    @Test void separatesBrowserPublishRequestFromPluginClaimAndResult() throws Exception {
         UUID id = UUID.randomUUID(), publishId = UUID.randomUUID();
         SessionService sessions = mock(SessionService.class); EditorSession editor = mock(EditorSession.class);
         when(editor.id()).thenReturn(id); when(editor.installationId()).thenReturn(UUID.randomUUID());
@@ -111,13 +111,15 @@ class EditorLeaseAuthenticationFilterTest {
 
         filter.doFilter(request("POST", "/api/v1/editor/sessions/" + id + "/publishes", "browser"),
                 new MockHttpServletResponse(), (request, response) -> {});
+        filter.doFilter(request("POST", "/api/v1/editor/sessions/" + id + "/publishes/claim", "plugin"),
+                new MockHttpServletResponse(), (request, response) -> {});
         filter.doFilter(request("POST", "/api/v1/editor/sessions/" + id + "/publishes/confirm", "plugin"),
                 new MockHttpServletResponse(), (request, response) -> {});
         filter.doFilter(request("POST", "/api/v1/editor/sessions/" + id + "/publishes/" + publishId + "/result", "plugin"),
                 new MockHttpServletResponse(), (request, response) -> {});
 
         verify(sessions).authenticateBrowser(id, "browser");
-        verify(sessions, times(2)).authenticatePlugin(id, "plugin");
+        verify(sessions, times(3)).authenticatePlugin(id, "plugin");
     }
 
     @Test void separatesMetadataUploadAndDownloadLeases() throws Exception {

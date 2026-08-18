@@ -79,8 +79,12 @@ public final class EditorSession {
     public boolean pluginIdle(Instant cutoff) { return pluginActivity.isBefore(cutoff); }
     public boolean browserIdle(Instant cutoff) { return browserActivity.isBefore(cutoff); }
     private boolean accept(AtomicLong counter, long sequence) {
-        long previous = counter.get();
-        return sequence == previous + 1 && counter.compareAndSet(previous, sequence);
+        if (sequence <= 0) return false;
+        while (true) {
+            long previous = counter.get();
+            if (sequence <= previous) return false;
+            if (counter.compareAndSet(previous, sequence)) return true;
+        }
     }
     public Set<Capability> requestedCapabilities() { return requestedCapabilities; }
     public synchronized Set<Capability> capabilities() { return grantedCapabilities; }

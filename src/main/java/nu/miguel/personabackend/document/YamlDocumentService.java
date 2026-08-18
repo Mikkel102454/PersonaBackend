@@ -214,6 +214,52 @@ public final class YamlDocumentService {
         return result;
     }
 
+    /** Copies one complete mapping entry, changing only its stable key and indentation. */
+    public YamlDocumentResponse copyMappingField(String targetContent, String targetParentPath,
+                                                 String sourceContent, String sourcePath, String replacementKey) {
+        if (replacementKey == null || !replacementKey.matches("[a-z0-9][a-z0-9_.-]{0,127}"))
+            throw bad("Invalid copied mapping key");
+        YamlDocumentResponse sourceDocument = parse(sourceContent), targetDocument = parse(targetContent);
+        YamlDocumentNode source = sourceDocument.valid() ? find(sourceDocument.root(), sourcePath) : null;
+        YamlDocumentNode sourceParent = source == null ? null : find(sourceDocument.root(), parentPath(sourcePath));
+        YamlDocumentNode targetParent = targetDocument.valid() ? find(targetDocument.root(), targetParentPath) : null;
+        if (source == null || source.key() == null || source.keyOffset() < 0 || sourceParent == null
+                || !"mapping".equals(sourceParent.kind()) || targetParent == null || !"mapping".equals(targetParent.kind())
+                || targetParent.children().stream().anyMatch(child -> replacementKey.equals(child.key())))
+            throw bad("Choose a complete mapping node and a destination without that key");
+        Range sourceRange = range(sourceContent, sourceDocument.root(), source);
+        int relativeKey = source.keyOffset() - sourceRange.start();
+        String block = sourceContent.substring(sourceRange.start(), sourceRange.end());
+        if (relativeKey < 0 || relativeKey + source.key().length() > block.length()
+                || !block.regionMatches(relativeKey, source.key(), 0, source.key().length()))
+            throw bad("The copied mapping key is not a plain stable key");
+        block = block.substring(0, relativeKey) + replacementKey
+                + block.substring(relativeKey + source.key().length());
+        String updated;
+        if (targetParent.children().isEmpty()) {
+            String existing = targetContent.substring(targetParent.startOffset(), targetParent.endOffset());
+            int lineEnd = lineEnd(targetContent, targetParent.endOffset());
+            if (!existing.equals("{}") || !targetContent.substring(targetParent.endOffset(), lineEnd).trim().isEmpty())
+                throw bad("An empty custom mapping with inline data must be edited in YAML");
+            int targetIndent = Math.max(0, targetParent.keyColumn() - 1) + 2;
+            block = reindent(block, indentAt(sourceContent, sourceRange.start()), targetIndent);
+            if (!block.endsWith("\n")) block += '\n';
+            updated = targetContent.substring(0, targetParent.startOffset()) + "\n" + block
+                    + targetContent.substring(targetParent.endOffset());
+        } else {
+            YamlDocumentNode last = targetParent.children().getLast();
+            Range lastRange = range(targetContent, targetDocument.root(), last);
+            int targetIndent = indentAt(targetContent,
+                    range(targetContent, targetDocument.root(), targetParent.children().getFirst()).start());
+            block = reindent(block, indentAt(sourceContent, sourceRange.start()), targetIndent);
+            if (!block.endsWith("\n")) block += '\n';
+            updated = targetContent.substring(0, lastRange.end()) + block + targetContent.substring(lastRange.end());
+        }
+        YamlDocumentResponse result = parse(updated);
+        if (!result.valid()) throw bad("The mapping copy did not produce valid YAML");
+        return result;
+    }
+
     /** Wraps one list item in a server-defined behaviour container without touching sibling bytes. */
     public YamlDocumentResponse wrapSequenceItem(String content, String sourcePath, String wrapperId,
                                                  String wrapperType) {
@@ -271,15 +317,37 @@ public final class YamlDocumentService {
             throw bad("Invalid visual mapping template");
         YamlDocumentResponse parsed = parse(request.content());
         YamlDocumentNode parent = find(parsed.root(), request.parentPath());
-        if (!parsed.valid() || parent == null || !parent.kind().equals("mapping")
+        boolean implicitNullParent = parent != null && "null".equals(parent.kind())
+                && parent.startOffset() == parent.endOffset()
+                && request.content().substring(parent.endOffset(),
+                lineEnd(request.content(), parent.endOffset())).trim().isEmpty();
+        if (!parsed.valid() || parent == null
+                || (!parent.kind().equals("mapping") && !implicitNullParent)
                 || parent.children().stream().anyMatch(child -> request.key().equals(child.key())))
             throw bad("Choose a mapping without that key");
         String candidate = request.key() + ":\n" + indent(request.yamlValue(), 2);
         YamlDocumentResponse fragment = parse(candidate);
         if (!fragment.valid()) throw bad("Invalid mapping value template");
         String updated;
-        if (parent.children().isEmpty()) {
-            String existing = request.content().substring(parent.startOffset(), parent.endOffset());
+        String existing = request.content().substring(parent.startOffset(), parent.endOffset());
+        boolean scalarValue = !fragment.root().children().isEmpty()
+                && fragment.root().children().getFirst().children().isEmpty();
+        if (implicitNullParent) {
+            int targetIndent = Math.max(0, parent.keyColumn() - 1) + 2;
+            String block = reindent(candidate, 0, targetIndent);
+            if (!block.endsWith("\n")) block += '\n';
+            updated = request.content().substring(0, parent.startOffset()) + "\n" + block
+                    + request.content().substring(lineEnd(request.content(), parent.endOffset()));
+        } else if (scalarValue && !request.yamlValue().contains("\n")
+                && existing.strip().startsWith("{") && existing.strip().endsWith("}")) {
+            int closing = existing.lastIndexOf('}');
+            int insertionAt = closing;
+            while (insertionAt > 0 && Character.isWhitespace(existing.charAt(insertionAt - 1))) insertionAt--;
+            String interior = existing.substring(existing.indexOf('{') + 1, closing).trim();
+            String insertion = (interior.isEmpty() ? "" : ", ") + request.key() + ": " + request.yamlValue();
+            updated = request.content().substring(0, parent.startOffset() + insertionAt) + insertion
+                    + request.content().substring(parent.startOffset() + insertionAt);
+        } else if (parent.children().isEmpty()) {
             int lineEnd = lineEnd(request.content(), parent.endOffset());
             String suffix = request.content().substring(parent.endOffset(), lineEnd).trim();
             if (!existing.equals("{}") || !suffix.isEmpty())

@@ -13,7 +13,7 @@ function scalar(content, key) {
 }
 
 export function kindForPath(path) {
-  if (path === 'scripts.yml') return 'script';
+  if (path.startsWith('scripts/')) return 'script';
   for (const [kind] of GROUPS) if (kind !== 'other' && path.startsWith(`${kind}s/`)) return kind;
   return 'other';
 }
@@ -21,21 +21,8 @@ export function kindForPath(path) {
 export function deriveResources(files) {
   const resources = [];
   for (const [path, content] of files) {
+    if (path === '.persona/project.yml') continue;
     const kind = kindForPath(path);
-    if (kind === 'script') {
-      const scriptsLine = content.search(/^scripts:\s*(?:#.*)?$/m);
-      if (scriptsLine >= 0) {
-        const tail = content.slice(scriptsLine).split(/\r?\n/).slice(1);
-        for (const line of tail) {
-          if (line && !/^\s/.test(line)) break;
-          const match = line.match(/^ {2}([a-z0-9][a-z0-9_.-]{0,127}):(?:\s|$)/);
-          if (match) resources.push(resource('script', match[1], match[1], path, content,
-            `/scripts/${match[1].replaceAll('~', '~0').replaceAll('/', '~1')}`));
-        }
-      }
-      if (!resources.some(item => item.path === path)) resources.push(resource('other', path, 'scripts.yml', path, content, ''));
-      continue;
-    }
     const id = scalar(content, 'id') || path;
     const label = scalar(content, kind === 'npc' ? 'display-name' : 'title') || id;
     resources.push(resource(kind, id, label, path, content, ''));
@@ -45,6 +32,7 @@ export function deriveResources(files) {
 
 function resource(kind, id, label, path, content, yamlPath) {
   return { identity: `${kind}:${id}`, kind, id, label, path, yamlPath,
+    folder: path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '',
     search: `${kind} ${id} ${label} ${path} ${content}`.toLowerCase() };
 }
 
@@ -52,6 +40,11 @@ export class WorkspaceShell {
   constructor(options) {
     this.options = options;
     this.root = document.querySelector('#project');
+    this.sources = document.querySelector('#sources-tree');
+    this.assetBreadcrumbs = document.querySelector('#asset-breadcrumbs');
+    this.resultCount = document.querySelector('#content-result-count');
+    this.recursiveToggle = document.querySelector('#content-recursive');
+    this.viewToggle = document.querySelector('#content-view-toggle');
     this.tabsElement = document.querySelector('#resource-tabs');
     this.breadcrumbs = document.querySelector('#breadcrumbs');
     this.search = document.querySelector('#content-search');
@@ -64,6 +57,7 @@ export class WorkspaceShell {
     this.backButton = document.querySelector('#history-back');
     this.forwardButton = document.querySelector('#history-forward');
     this.resources = [];
+    this.folders = new Set(GROUPS.filter(([kind]) => kind !== 'other').map(([kind]) => `${kind}s`));
     this.openTabs = [];
     this.closedTabs = [];
     this.active = null;
@@ -73,8 +67,9 @@ export class WorkspaceShell {
     this.nestedBreadcrumbs = [];
     this.browserView = 'library';
     this.browserLimits = Object.fromEntries(GROUPS.map(([kind]) => [kind, CONTENT_WINDOW]));
-    this.preferences = this.loadPreferences();
     this.preferenceKey = 'persona:workspace-preferences:v1';
+    this.preferences = this.loadPreferences();
+    this.selectedFolder = this.preferences.selectedFolder || 'npcs';
     this.bind();
   }
 
@@ -86,6 +81,13 @@ export class WorkspaceShell {
       this.preferences.compact = !this.preferences.compact;
       this.savePreferences(); this.renderBrowser();
     });
+    this.recursiveToggle?.addEventListener('change', () => {
+      this.preferences.recursive = this.recursiveToggle.checked; this.savePreferences(); this.renderBrowser();
+    });
+    this.viewToggle?.addEventListener('click', () => {
+      this.preferences.viewStyle = this.preferences.viewStyle === 'tiles' ? 'list' : 'tiles';
+      this.savePreferences(); this.renderBrowser();
+    });
     this.backButton.addEventListener('click', () => this.navigateHistory('back'));
     this.forwardButton.addEventListener('click', () => this.navigateHistory('forward'));
     this.quickSearch.addEventListener('input', () => this.renderQuickOpen());
@@ -93,8 +95,10 @@ export class WorkspaceShell {
     window.addEventListener('keydown', event => this.keydown(event));
   }
 
-  update(resources, activeIdentity = this.active) {
+  update(resources, activeIdentity = this.active, folders = this.folders) {
     this.resources = resources;
+    this.folders = this.buildFolders(folders);
+    if (!this.folders.has(this.selectedFolder)) this.selectedFolder = 'npcs';
     this.openTabs = this.openTabs.filter(identity => resources.some(item => item.identity === identity));
     if (activeIdentity && resources.some(item => item.identity === activeIdentity)) this.active = activeIdentity;
     else if (this.active && !resources.some(item => item.identity === this.active)) this.active = null;
@@ -111,6 +115,9 @@ export class WorkspaceShell {
     if (this.active && this.active !== resource.identity) this.options.beforeOpen?.(this.active);
     if (!this.openTabs.includes(resource.identity)) this.openTabs.push(resource.identity);
     this.active = resource.identity;
+    this.selectedFolder = resource.folder;
+    this.preferences.selectedFolder = this.selectedFolder;
+    this.savePreferences();
     this.recent = [resource.identity, ...this.recent.filter(item => item !== resource.identity)].slice(0, 100);
     this.options.open(resource);
     this.render();
@@ -157,7 +164,10 @@ export class WorkspaceShell {
   renderBrowser() {
     const query = this.search.value.trim().toLowerCase();
     const filter = this.filter.value;
-    let visible = this.resources.filter(item => resourceMatches(item, query, this.options.searchTerms?.(item) || '')
+    const recursive = Boolean(this.preferences.recursive);
+    let visible = this.resources.filter(item => (item.folder === this.selectedFolder
+        || recursive && item.folder.startsWith(this.selectedFolder + '/'))
+      && resourceMatches(item, query, this.options.searchTerms?.(item) || '')
       && this.matchesFilter(item, filter));
     if (this.browserView === 'bookmarks') visible = visible.filter(item => this.options.bookmarked?.(item));
     const recentIndex = identity => { const index = this.recent.indexOf(identity); return index < 0 ? Number.MAX_SAFE_INTEGER : index; };
@@ -169,37 +179,113 @@ export class WorkspaceShell {
       return left.label.localeCompare(right.label) || left.id.localeCompare(right.id);
     });
     this.root.classList.toggle('compact', this.preferences.compact);
+    this.root.classList.toggle('tile-view', this.preferences.viewStyle === 'tiles');
+    this.root.setAttribute('role', this.preferences.viewStyle === 'tiles' ? 'grid' : 'list');
     this.density.setAttribute('aria-pressed', String(this.preferences.compact));
     this.density.textContent = this.preferences.compact ? 'Comfortable' : 'Compact';
+    this.recursiveToggle.checked = recursive;
+    this.viewToggle.textContent = this.preferences.viewStyle === 'tiles' ? 'List view' : 'Tile view';
+    this.renderSources(); this.renderAssetBreadcrumbs();
+    this.resultCount.textContent = `${visible.length} result${visible.length === 1 ? '' : 's'}`;
+    const rendered = boundedResources(visible, Math.max(...Object.values(this.browserLimits)));
     const fragment = document.createDocumentFragment();
-    for (const [kind, label] of GROUPS) {
-      const items = visible.filter(item => item.kind === kind);
-      const allCount = this.resources.filter(item => item.kind === kind).length;
-      const section = document.createElement('section'); section.className = 'content-group';
-      const heading = document.createElement('button'); heading.type = 'button'; heading.className = 'content-group-heading';
-      heading.setAttribute('aria-expanded', String(!this.preferences.collapsed[kind]));
-      heading.innerHTML = `<span>${label}</span><span>${items.length === allCount ? allCount : `${items.length}/${allCount}`}</span>`;
-      heading.addEventListener('click', () => { this.preferences.collapsed[kind] = !this.preferences.collapsed[kind]; this.savePreferences(); this.renderBrowser(); });
-      section.append(heading);
-      if (!this.preferences.collapsed[kind]) {
-        const list = document.createElement('ul');
-        const rendered = boundedResources(items, this.browserLimits[kind]);
-        for (const item of rendered) list.append(this.browserItem(item));
-        if (!items.length) { const empty = document.createElement('li'); empty.className = 'content-empty'; empty.textContent = query || filter !== 'all' ? 'No matches' : 'No content'; list.append(empty); }
-        if (rendered.length < items.length) {
-          const more = document.createElement('li'), button = document.createElement('button');
-          button.type = 'button'; button.className = 'content-load-more';
-          button.textContent = `Show ${Math.min(CONTENT_WINDOW, items.length - rendered.length)} more ${label}`;
-          button.addEventListener('click', () => { this.browserLimits[kind] = rendered.length + CONTENT_WINDOW; this.renderBrowser();
-            this.root.querySelector(`.content-group[data-kind="${kind}"] .content-load-more`)?.focus(); });
-          more.append(button); list.append(more);
-        }
-        section.append(list);
-      }
-      section.dataset.kind = kind;
-      fragment.append(section);
-    }
+    for (const item of rendered) fragment.append(this.browserItem(item));
+    if (!rendered.length) { const empty = document.createElement('p'); empty.className = 'content-empty'; empty.textContent = query || filter !== 'all' ? 'No matches in this search scope' : 'This folder has no resources'; fragment.append(empty); }
     this.root.replaceChildren(fragment);
+  }
+
+  buildFolders(declared) {
+    const result = new Set(GROUPS.filter(([kind]) => kind !== 'other').map(([kind]) => `${kind}s`));
+    for (const folder of declared || []) result.add(folder);
+    for (const item of this.resources) {
+      let folder = item.folder;
+      while (folder) { result.add(folder); const slash = folder.lastIndexOf('/'); if (slash < 0) break; folder = folder.slice(0, slash); }
+    }
+    return result;
+  }
+
+  selectFolder(folder, history = true) {
+    if (!this.folders.has(folder)) return;
+    if (history && this.selectedFolder !== folder) { this.back.push(`folder:${this.selectedFolder}`); this.forward.length = 0; }
+    this.selectedFolder = folder; this.preferences.selectedFolder = folder; this.savePreferences();
+    this.renderBrowser(); this.renderHistoryButtons();
+  }
+
+  renderSources() {
+    const fragment = document.createDocumentFragment();
+    const folders = [...this.folders].sort((left, right) => left.localeCompare(right));
+    for (const folder of folders) {
+      const depth = folder.split('/').length - 1;
+      const parent = folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : null;
+      if (parent && [...this.preferences.collapsedFolders].some(value => parent === value || parent.startsWith(value + '/'))) continue;
+      const row = document.createElement('div'); row.className = 'source-row'; row.setAttribute('role', 'treeitem');
+      row.setAttribute('aria-level', String(depth + 1)); row.style.setProperty('--source-depth', depth);
+      const children = folders.some(value => value.startsWith(folder + '/') && value.split('/').length === folder.split('/').length + 1);
+      const expand = document.createElement('button'); expand.type = 'button'; expand.className = 'source-expand';
+      expand.textContent = children ? (this.preferences.collapsedFolders.has(folder) ? '▸' : '▾') : '';
+      expand.disabled = !children; expand.setAttribute('aria-label', `${this.preferences.collapsedFolders.has(folder) ? 'Expand' : 'Collapse'} ${folder}`);
+      expand.addEventListener('click', () => { this.preferences.collapsedFolders.has(folder)
+        ? this.preferences.collapsedFolders.delete(folder) : this.preferences.collapsedFolders.add(folder); this.savePreferences(); this.renderSources(); });
+      const button = document.createElement('button'); button.type = 'button'; button.className = 'source-folder';
+      button.textContent = `${this.preferences.folderFavorites.has(folder) ? '★ ' : ''}${folder.split('/').at(-1)}`;
+      button.style.setProperty('--folder-color', this.preferences.folderColors[folder] || 'transparent');
+      if (folder === this.selectedFolder) { button.setAttribute('aria-current', 'true'); row.setAttribute('aria-selected', 'true'); }
+      button.addEventListener('click', () => this.selectFolder(folder));
+      button.addEventListener('contextmenu', event => { event.preventDefault(); this.openFolderMenu(folder, event.clientX, event.clientY, button); });
+      if (depth) { button.draggable = true; button.addEventListener('dragstart', event => event.dataTransfer.setData('application/x-persona-folder', folder)); }
+      button.addEventListener('dragover', event => { if ([...event.dataTransfer.types].some(type => type.startsWith('application/x-persona-'))) event.preventDefault(); });
+      button.addEventListener('drop', event => this.dropOnFolder(event, folder));
+      row.append(expand, button); fragment.append(row);
+    }
+    this.sources.replaceChildren(fragment);
+  }
+
+  renderAssetBreadcrumbs() {
+    const parts = this.selectedFolder.split('/');
+    this.assetBreadcrumbs.replaceChildren(...parts.flatMap((part, index) => {
+      const path = parts.slice(0, index + 1).join('/'), button = document.createElement('button');
+      button.type = 'button'; button.textContent = part; button.addEventListener('click', () => this.selectFolder(path));
+      return index ? [document.createTextNode('›'), button] : [button];
+    }));
+  }
+
+  openFolderMenu(folder, x, y, restore) {
+    document.querySelector('#folder-context-menu')?.remove();
+    const menu = document.createElement('div'); menu.id = 'folder-context-menu'; menu.className = 'resource-tab-menu';
+    menu.setAttribute('role', 'menu'); menu.style.left = `${x}px`; menu.style.top = `${y}px`;
+    const root = !folder.includes('/');
+    const action = (label, run, disabled = false) => { const button = document.createElement('button'); button.type = 'button';
+      button.setAttribute('role', 'menuitem'); button.textContent = label; button.disabled = disabled;
+      button.addEventListener('click', () => { menu.remove(); run(); }); menu.append(button); };
+    action('New Folder', () => this.options.createFolder?.(folder));
+    action('Create Resource Here', () => this.options.createHere?.(folder));
+    action('Rename', () => this.options.moveFolder?.(folder), root);
+    action('Move', () => {
+      const parent = folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : folder;
+      const destination = prompt(`Move ${folder} beneath folder:`, parent);
+      if (destination && destination !== parent) this.options.moveFolder?.(folder, destination);
+    }, root);
+    action('Delete', () => this.options.deleteFolder?.(folder), root);
+    action(this.preferences.folderFavorites.has(folder) ? 'Remove from Favorites' : 'Add to Favorites', () => {
+      this.preferences.folderFavorites.has(folder) ? this.preferences.folderFavorites.delete(folder) : this.preferences.folderFavorites.add(folder);
+      this.savePreferences(); this.renderSources();
+    });
+    action('Set Local Color', () => { const color = prompt('Folder color (CSS hex)', this.preferences.folderColors[folder] || '#5d77a8');
+      if (color && /^#[0-9a-f]{6}$/i.test(color)) { this.preferences.folderColors[folder] = color; this.savePreferences(); this.renderSources(); } });
+    action('Copy Path', () => navigator.clipboard?.writeText(folder));
+    document.body.append(menu); menu.querySelector('button:not(:disabled)')?.focus();
+    setTimeout(() => document.addEventListener('pointerdown', event => { if (!menu.contains(event.target)) { menu.remove(); restore?.focus(); } }, { once: true }), 0);
+  }
+
+  dropOnFolder(event, folder) {
+    event.preventDefault();
+    const sourceFolder = event.dataTransfer.getData('application/x-persona-folder');
+    if (sourceFolder) { this.options.moveFolder?.(sourceFolder, folder); return; }
+    const identity = event.dataTransfer.getData('application/x-persona-project-resource');
+    const resource = this.resources.find(item => item.identity === identity);
+    if (!resource) return;
+    if (event.ctrlKey || event.metaKey) this.options.copyResourceToFolder?.(resource, folder);
+    else this.options.moveResourceToFolder?.(resource, folder);
   }
 
   browserItem(item) {
@@ -212,7 +298,8 @@ export class WorkspaceShell {
     button.title = `${item.kind}: ${item.id}\n${item.path}`;
     if (item.identity === this.active) button.setAttribute('aria-current', 'page');
     if (['npc','dialogue','quest','behavior','script'].includes(item.kind)) { button.draggable = true;
-      button.addEventListener('dragstart', event => { event.dataTransfer.effectAllowed = 'copy';
+      button.addEventListener('dragstart', event => { event.dataTransfer.effectAllowed = 'copyMove';
+        event.dataTransfer.setData('application/x-persona-project-resource', item.identity);
         event.dataTransfer.setData('application/x-persona-resource', JSON.stringify({ kind: item.kind, id: item.id })); }); }
     button.addEventListener('click', () => this.openResource(item));
     row.append(button); return row;
@@ -313,8 +400,13 @@ export class WorkspaceShell {
     const source = direction === 'back' ? this.back : this.forward;
     const target = direction === 'back' ? this.forward : this.back;
     const identity = source.pop(); if (!identity) return;
-    if (this.active) target.push(this.active);
-    this.openResource(identity, false); this.renderHistoryButtons();
+    if (identity.startsWith('folder:')) {
+      target.push(`folder:${this.selectedFolder}`); this.selectFolder(identity.slice(7), false);
+    } else {
+      if (this.active) target.push(this.active);
+      this.openResource(identity, false);
+    }
+    this.renderHistoryButtons();
   }
   renderHistoryButtons() { this.backButton.disabled = !this.back.length; this.forwardButton.disabled = !this.forward.length; }
 
@@ -338,8 +430,15 @@ export class WorkspaceShell {
   loadPreferences() {
     try {
       const saved = JSON.parse(localStorage.getItem(this.preferenceKey || 'persona:workspace-preferences:v1') || '{}');
-      return { compact: Boolean(saved.compact), collapsed: saved.collapsed && typeof saved.collapsed === 'object' ? saved.collapsed : {} };
-    } catch { return { compact: false, collapsed: {} }; }
+      return { compact: Boolean(saved.compact), collapsed: saved.collapsed && typeof saved.collapsed === 'object' ? saved.collapsed : {},
+        selectedFolder: typeof saved.selectedFolder === 'string' ? saved.selectedFolder : 'npcs',
+        viewStyle: saved.viewStyle === 'tiles' ? 'tiles' : 'list', recursive: Boolean(saved.recursive),
+        collapsedFolders: new Set(Array.isArray(saved.collapsedFolders) ? saved.collapsedFolders : []),
+        folderFavorites: new Set(Array.isArray(saved.folderFavorites) ? saved.folderFavorites : []),
+        folderColors: saved.folderColors && typeof saved.folderColors === 'object' ? saved.folderColors : {} };
+    } catch { return { compact: false, collapsed: {}, selectedFolder: 'npcs', viewStyle: 'list', recursive: false,
+      collapsedFolders: new Set(), folderFavorites: new Set(), folderColors: {} }; }
   }
-  savePreferences() { localStorage.setItem(this.preferenceKey, JSON.stringify(this.preferences)); }
+  savePreferences() { localStorage.setItem(this.preferenceKey, JSON.stringify({ ...this.preferences,
+    collapsedFolders: [...this.preferences.collapsedFolders], folderFavorites: [...this.preferences.folderFavorites] })); }
 }

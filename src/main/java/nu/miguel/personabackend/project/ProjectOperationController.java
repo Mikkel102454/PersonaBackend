@@ -59,6 +59,30 @@ public final class ProjectOperationController {
         check(sessionId);
         return operations.move(request);
     }
+    @PostMapping("/folders/create")
+    public ProjectOperationResponse createFolder(@PathVariable UUID sessionId,
+                                                 @RequestBody ProjectCreateFolderRequest request) {
+        check(sessionId);
+        return operations.createFolder(request);
+    }
+    @PostMapping("/folders/move")
+    public ProjectOperationResponse moveFolder(@PathVariable UUID sessionId,
+                                               @RequestBody ProjectMoveFolderRequest request) {
+        check(sessionId);
+        return operations.moveFolder(request);
+    }
+    @PostMapping("/folders/delete-preview")
+    public ProjectFolderDeletePreview previewFolderDeletion(@PathVariable UUID sessionId,
+                                                             @RequestBody ProjectDeleteFolderRequest request) {
+        check(sessionId);
+        return operations.previewFolderDeletion(request);
+    }
+    @PostMapping("/folders/delete")
+    public ProjectOperationResponse deleteFolder(@PathVariable UUID sessionId,
+                                                 @RequestBody ProjectDeleteFolderRequest request) {
+        check(sessionId);
+        return operations.deleteFolder(request);
+    }
     @PostMapping("/extract-script")
     public ProjectOperationResponse extractScript(@PathVariable UUID sessionId,
                                                    @RequestBody ProjectExtractScriptRequest request) {

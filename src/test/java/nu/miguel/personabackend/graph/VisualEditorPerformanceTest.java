@@ -36,10 +36,10 @@ class VisualEditorPerformanceTest {
         for (int index = 0; index < 1_000; index++) {
             String id = "perf:dialogue-" + index;
             files.add(file("dialogues/dialogue-" + index + ".yml",
-                    "id: " + id + "\nstart: start\nnodes:\n  start:\n    script: [{type: end-dialogue}]\n"));
+                    "content-version: 2\nid: " + id + "\nstart: start\nnodes:\n  start:\n    graph:\n      variables: {}\n      nodes: { end: { type: end-dialogue } }\n      connections: { enter: { from: $event.exec, to: end.exec } }\n"));
         }
         for (int index = 0; index < 1_000; index++) {
-            StringBuilder yaml = new StringBuilder("id: perf:npc-").append(index).append("\ndialogues:\n");
+            StringBuilder yaml = new StringBuilder("content-version: 2\nid: perf:npc-").append(index).append("\ndialogues:\n");
             for (int edge = 0; edge < 12; edge++) yaml.append("  - id: perf:dialogue-").append((index + edge) % 1_000).append('\n');
             files.add(file("npcs/npc-" + index + ".yml", yaml.toString()));
         }

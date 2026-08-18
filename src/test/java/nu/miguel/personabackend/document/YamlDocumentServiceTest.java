@@ -15,7 +15,19 @@ class YamlDocumentServiceTest {
 
     @Test void movesAndDuplicatesWholeListBranchesWithoutReserializingCustomYaml(){String yaml="nodes:\n  # retained comment\n  - id: first\n    extension-owned: future-value\n  - id: second\n    extension-owned: other-value\n";YamlDocumentResponse moved=documents.structure(new YamlStructureRequest(yaml,YamlStructureRequest.Operation.MOVE_BEFORE,"/nodes/1","/nodes/0"));assertTrue(moved.valid(),moved.content());assertTrue(moved.content().indexOf("id: second")<moved.content().indexOf("id: first"),moved.content());assertTrue(moved.content().contains("# retained comment"),moved.content());assertTrue(moved.content().contains("extension-owned: future-value"),moved.content());YamlDocumentResponse duplicated=documents.structure(new YamlStructureRequest(moved.content(),YamlStructureRequest.Operation.DUPLICATE_AFTER,"/nodes/1",null));assertTrue(duplicated.valid(),duplicated.content());assertTrue(duplicated.content().contains("duplicate-"),duplicated.content());}
 
-    @Test void insertsTypedListAndMappingTemplatesWithoutRewritingExistingYaml(){String behavior="# keep\nchildren:\n  - id: existing\n    type: action\n    action: set-visible\n";YamlDocumentResponse inserted=documents.insert(new YamlInsertRequest(behavior,"/children","- id: generated\n  type: condition\n  condition: chance\n  chance: 0.5"));assertTrue(inserted.valid(),inserted.content());assertTrue(inserted.content().contains("# keep"));assertTrue(inserted.content().contains("id: generated"));String dialogue="nodes:\n  greeting:\n    script:\n      - type: end-dialogue\n";YamlDocumentResponse node=documents.insertField(new YamlMappingInsertRequest(dialogue,"/nodes","next","script:\n  - type: say\n    text: Hello"));assertTrue(node.valid(),node.content());assertTrue(node.content().contains("  next:\n    script:"),node.content());}
+    @Test void insertsTypedListAndMappingTemplatesWithoutRewritingExistingYaml(){String behavior="# keep\nchildren:\n  - id: existing\n    type: action\n    action: set-visible\n";YamlDocumentResponse inserted=documents.insert(new YamlInsertRequest(behavior,"/children","- id: generated\n  type: condition\n  condition: chance\n  chance: 0.5"));assertTrue(inserted.valid(),inserted.content());assertTrue(inserted.content().contains("# keep"));assertTrue(inserted.content().contains("id: generated"));String dialogue="content-version: 2\nnodes:\n  greeting:\n    graph:\n      variables: {}\n      nodes: {}\n      connections: {}\n";YamlDocumentResponse node=documents.insertField(new YamlMappingInsertRequest(dialogue,"/nodes","next","graph:\n  variables: {}\n  nodes: { line: { type: say, text: Hello } }\n  connections: { enter: { from: $event.exec, to: line.exec } }"));assertTrue(node.valid(),node.content());assertTrue(node.content().contains("  next:\n    graph:"),node.content());}
+
+    @Test void expandsOnlyImplicitEmptyValuesWhenInsertingTheFirstMappingField() {
+        String source = "nodes:\nconnections: {}\n";
+
+        YamlDocumentResponse inserted = documents.insertField(new YamlMappingInsertRequest(
+                source, "/nodes", "give-item", "type: give-item\nmaterial: STONE"));
+
+        assertEquals("nodes:\n  give-item:\n    type: give-item\n    material: STONE\nconnections: {}\n",
+                inserted.content());
+        assertThrows(ResponseStatusException.class, () -> documents.insertField(new YamlMappingInsertRequest(
+                "nodes: null\n", "/nodes", "give-item", "type: give-item")));
+    }
 
     @Test void extractsACompleteBranchIntoAStandaloneSubtreeAndLeavesAReference(){String source="id: demo:root\nscope: player\nroot:\n  id: root\n  type: sequence\n  children:\n    - id: branch\n      type: sequence\n      children:\n        - id: leaf\n          type: wait\n          duration: 1s\n";YamlExtractResponse result=documents.extractSubtree(new YamlExtractRequest(source,"/root/children/0","demo:branch","player"));assertTrue(result.source().valid(),result.source().content());assertTrue(result.source().content().contains("type: subtree\n      subtree: demo:branch"),result.source().content());assertTrue(result.extractedContent().contains("root:\n  id: branch\n  type: sequence\n  children:\n    - id: leaf"),result.extractedContent());}
 
@@ -121,7 +133,7 @@ class YamlDocumentServiceTest {
                 fixture("npc", "id: demo:npc\ndisplay-name: Old name\n", "/display-name", "New name"),
                 fixture("quest", "id: demo:quest\ntitle: Old title\nphases: []\n", "/title", "New title"),
                 fixture("dialogue", "id: demo:talk\nstart: hello\nnodes:\n  hello:\n    text: Old text\n", "/nodes/hello/text", "New text"),
-                fixture("script", "scripts:\n  greet:\n    - type: message\n      text: Old text\n", "/scripts/greet/0/text", "New text"),
+                fixture("script", "content-version: 2\nid: greet\ninputs: {}\noutputs: {}\nvariables: {}\nnodes:\n  message:\n    type: message\n    text: Old text\nconnections: {}\n", "/nodes/message/text", "New text"),
                 fixture("extension", "id: demo:extension\nscope: player\nroot:\n  id: custom\n  type: vendor:custom\n  options:\n    label: Old label\n", "/root/options/label", "New label")
         );
     }

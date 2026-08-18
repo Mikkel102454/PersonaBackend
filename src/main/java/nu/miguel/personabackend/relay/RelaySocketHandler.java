@@ -100,16 +100,15 @@ public final class RelaySocketHandler extends TextWebSocketHandler {
         SocketMessage message;
         try { message = json.readValue(text.getPayload(), SocketMessage.class); }
         catch (Exception e) { socket.close(CloseStatus.BAD_DATA); return; }
-        if (message.protocolVersion() != Protocol.VERSION || !editor.id().equals(message.sessionId())
-                || !allowedType(message.type()) || !allowedByCapability(editor, message.type())
-                || !validPayload(message) || !validSignature(editor, message)) {
-            socket.close(CloseStatus.POLICY_VIOLATION.withReason("Invalid envelope")); return;
+        String envelopeError = envelopeError(editor, message);
+        if (envelopeError != null) {
+            socket.close(CloseStatus.POLICY_VIOLATION.withReason(envelopeError)); return;
         }
         boolean sequenceAccepted = role == Role.PLUGIN
                 ? editor.acceptPluginSequence(message.sequence())
                 : editor.acceptBrowserSequence(message.sequence());
         if (!sequenceAccepted) {
-            socket.close(CloseStatus.POLICY_VIOLATION.withReason("Invalid envelope")); return;
+            socket.close(CloseStatus.POLICY_VIOLATION.withReason("Replayed or non-increasing sequence")); return;
         }
         if (role == Role.PLUGIN) editor.touchPlugin(); else editor.touchBrowser();
         try {
@@ -145,8 +144,19 @@ public final class RelaySocketHandler extends TextWebSocketHandler {
             audit.record(editor, role == Role.PLUGIN ? AuditEvent.ActorType.INSTALLATION : AuditEvent.ActorType.BROWSER,
                     role == Role.PLUGIN ? editor.installationId().toString() : editor.browserDescription(),
                     AuditEvent.EventType.CONNECTION, AuditEvent.Outcome.SUCCESS,
-                    Map.of("role", role.name(), "operation", "disconnected", "close-status", status.getCode()), socket.getId());
+                    Map.of("role", role.name(), "operation", "disconnected", "close-status", status.getCode(),
+                            "close-reason", Objects.toString(status.getReason(), "")), socket.getId());
         }
+    }
+
+    private String envelopeError(EditorSession editor, SocketMessage message) {
+        if (message.protocolVersion() != Protocol.VERSION) return "Protocol version mismatch";
+        if (!editor.id().equals(message.sessionId())) return "Session identity mismatch";
+        if (!allowedType(message.type())) return "Message type is not allowed for this socket role";
+        if (!allowedByCapability(editor, message.type())) return "Message capability is not granted";
+        if (!validPayload(message)) return "Invalid typed message payload";
+        if (!validSignature(editor, message)) return "Invalid message signature";
+        return null;
     }
 
     private boolean allowedType(String type) {
@@ -190,7 +200,7 @@ public final class RelaySocketHandler extends TextWebSocketHandler {
             case Protocol.LIVE_SUBSCRIBE -> message.payload().keySet().equals(Set.of("protocolVersion","subscriptionId","topics","filter","refreshMillis"));
             case Protocol.LIVE_UNSUBSCRIBE -> message.payload().keySet().equals(Set.of("protocolVersion","subscriptionId"));
             case Protocol.LIVE_SUBSCRIPTION_ACK -> message.payload().keySet().equals(Set.of("protocolVersion","subscriptionId","accepted","refreshMillis","message"));
-            case Protocol.LIVE_SNAPSHOT,Protocol.LIVE_DELTA -> message.payload().keySet().equals(Set.of("protocolVersion","subscriptionId","revision","capturedAt","full","players","npcs","behaviors","quests","dialogues","memories","server","removedKeys"));
+            case Protocol.LIVE_SNAPSHOT,Protocol.LIVE_DELTA -> message.payload().keySet().equals(Set.of("protocolVersion","subscriptionId","revision","capturedAt","full","players","npcs","behaviors","quests","dialogues","memories","traces","server","removedKeys"));
             case Protocol.BEHAVIOR_MUTATION_REQUEST -> message.payload().keySet().equals(Set.of("protocolVersion","requestId","operation","npcDefinition","npcInstance","playerId","signal","data"));
             case Protocol.MEMORY_MUTATION_REQUEST -> message.payload().keySet().equals(Set.of("protocolVersion","requestId","operation","playerId","npcDefinition","npcInstance","key","valueType","value","amount","expiresAt","expectedUpdatedAt"));
             case Protocol.LIVE_MUTATION_RESULT -> message.payload().keySet().equals(Set.of("protocolVersion","requestId","mutationType","operation","success","message","target","oldValue","newValue","completedAt"));

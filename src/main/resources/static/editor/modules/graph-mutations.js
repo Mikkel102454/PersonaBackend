@@ -41,8 +41,13 @@ export class GraphMutationClient {
           operations
         })
       });
-      const result = await readJson(response);
+      let result = await readJson(response);
       if (!response.ok) {
+        if (response.status === 403 && (!result || typeof result !== 'object' || !result.code)) result = {
+          ...(result && typeof result === 'object' ? result : {}),
+          code: 'DRAFT_EDIT_REQUIRED',
+          message: this.options.forbiddenMessage?.() || 'This graph edit requires additional session trust.'
+        };
         this.options.rollbackHistory?.(context);
         if (response.status === 409 || ['STALE_CONTENT', 'STALE_PROJECTION', 'STALE_PROJECT_REVISION', 'STALE_SOURCE_RANGE'].includes(result.code)) this.options.onConflict?.(result);
         else this.options.onContractError?.(label, result);
@@ -66,11 +71,24 @@ export class GraphMutationClient {
 async function readJson(response) {
   const text = await response.text();
   if (!text) return { code: 'EMPTY_RESPONSE', message: `HTTP ${response.status}` };
-  try { return JSON.parse(text); }
+  try {
+    const result = JSON.parse(text);
+    if (result && typeof result === 'object' && !result.message)
+      result.message = result.detail || result.error || `HTTP ${response.status}`;
+    return result;
+  }
   catch { return { code: 'INVALID_RESPONSE', message: text }; }
 }
 
 export function contractMessage(error) {
   const location = [error.filePath, error.yamlPath].filter(Boolean).join(' ');
   return `${error.code ? error.code + ': ' : ''}${error.message || 'Graph mutation rejected'}${location ? ` (${location})` : ''}`;
+}
+
+export function inlineDefaultOperation(projection, pin, value) {
+  const owner = (projection?.nodes || []).find(node => node.id === pin?.nodeId);
+  const belongsToExplicitGraph = projection?.resourceKind === 'script' || owner?.yamlPath?.includes('/nodes/');
+  return belongsToExplicitGraph
+    ? { type: 'SET_PIN_DEFAULT', targetPinId: pin.id, value }
+    : { type: 'EDIT_FIELD', yamlPath: pin.yamlPath, value };
 }

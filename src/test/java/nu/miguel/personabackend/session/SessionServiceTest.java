@@ -68,6 +68,19 @@ class SessionServiceTest {
                 created.verificationCode(), Base64.getEncoder().encodeToString(browser.getPublic().getEncoded()), "Replay")));
     }
 
+    @Test void socketSequencesPermitReconnectGapsButRejectReplayAndReordering() throws Exception {
+        SessionService service = new SessionService(properties);
+        KeyPair installation = KeyPairGenerator.getInstance("Ed25519").generateKeyPair();
+        SessionCreateResponse created = service.create(request(installation, UUID.randomUUID(), "sequence-gap-0001"));
+        EditorSession session = service.require(created.sessionId());
+
+        assertTrue(session.acceptPluginSequence(17));
+        assertFalse(session.acceptPluginSequence(17));
+        assertFalse(session.acceptPluginSequence(4));
+        assertTrue(session.acceptPluginSequence(23));
+        assertFalse(session.acceptPluginSequence(0));
+    }
+
     @Test void rejectsReplayAndChangedInstallationIdentity() throws Exception {
         SessionService service = new SessionService(properties);
         UUID id = UUID.randomUUID();

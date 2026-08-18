@@ -3,9 +3,9 @@ import { PanelLayout } from './modules/layout-store.js';
 import { GraphLayoutStore } from './modules/graph-layout.js';
 import { GraphCanvas } from './modules/graph-canvas.js';
 import { GraphInspector } from './modules/graph-inspector.js';
-import { GraphMutationClient, contractMessage } from './modules/graph-mutations.js';
+import { GraphMutationClient, contractMessage, inlineDefaultOperation } from './modules/graph-mutations.js';
 import { CommandDispatcher } from './modules/command-dispatcher.js';
-import { nodeDefinitions, compatibleDefinitions } from './modules/node-registry.js';
+import { nodeDefinitions, compatibleDefinitions, matchingDefinitionInput, automaticNodeId, yamlMappingKeys } from './modules/node-registry.js';
 import { createWorkspaceState } from './modules/workspace-state.js';
 import { SessionTransport } from './modules/transport.js';
 import { findModelNode } from './modules/yaml-documents.js';
@@ -20,6 +20,7 @@ const sessionId = location.pathname.match(/^\/editor\/session\/([0-9a-f-]+)$/i)?
 if (!sessionId) throw new Error('The Persona editor requires a server-created session URL.');
 const connectPanel = document.querySelector('#connect');
 const reconnectPanel = document.querySelector('#reconnect');
+const reconnectReason = document.querySelector('#reconnect-reason');
 const reconnectNow = document.querySelector('#reconnect-now');
 const verifyForm = document.querySelector('#verify');
 const status = document.querySelector('#status');
@@ -27,8 +28,6 @@ const workspace = document.querySelector('#workspace');
 const source = document.querySelector('#source');
 const fileName = document.querySelector('#file-name');
 const download = document.querySelector('#download');
-const exportAll = document.querySelector('#export-all');
-const exportChanged = document.querySelector('#export-changed');
 const undoButton = document.querySelector('#undo');
 const redoButton = document.querySelector('#redo');
 const copyButton = document.querySelector('#copy');
@@ -39,12 +38,12 @@ const palette = document.querySelector('#palette');
 const paletteOpen = document.querySelector('#palette-open');
 const paletteSearch = document.querySelector('#palette-search');
 const paletteResults = document.querySelector('#palette-results');
+const paletteContextSensitive = document.querySelector('#palette-context-sensitive');
 const visual = document.querySelector('#visual');
 const yamlStatus = document.querySelector('#yaml-status');
 const validationPanel = document.querySelector('#validation-panel');
 const validationSummary = document.querySelector('#validation-summary');
 const validationList = document.querySelector('#validation-list');
-const visualTools=document.querySelector('#visual-tools'),visualContainer=document.querySelector('#visual-container'),visualTemplate=document.querySelector('#visual-template');
 const insightsTitle=document.querySelector('#visual-insights-title'),visualGraph=document.querySelector('#visual-graph'),visualPreview=document.querySelector('#visual-preview'),simulationDialog=document.querySelector('#simulation-dialog'),simulationInput=document.querySelector('#simulation-input'),simulationOutput=document.querySelector('#simulation-output');
 const referencesOpen = document.querySelector('#references-open');
 const referencesDialog = document.querySelector('#references-dialog');
@@ -98,7 +97,13 @@ const workspaceShell = new WorkspaceShell({
   live: resource => resource.kind === 'npc'
     ? [...state.liveData.npcs.values()].some(value => value.definitionId === resource.id)
     : resource.kind === 'behavior' ? [...state.liveData.behaviors.values()].some(value => value.behaviorId === resource.id) : false,
-  restoreFocus: () => document.querySelector('#content-search')?.focus()
+  restoreFocus: () => document.querySelector('#content-search')?.focus(),
+  createFolder: parent => createProjectFolder(parent),
+  createHere: folder => openCreation(kindForFolder(folder), '', folder),
+  moveFolder: (folder, destination) => moveProjectFolder(folder, destination),
+  deleteFolder: folder => deleteProjectFolder(folder),
+  moveResourceToFolder: (resource, folder) => moveResourceToFolder(resource, folder),
+  copyResourceToFolder: (resource, folder) => copyResourceToFolder(resource, folder)
 });
 const panelLayout = new PanelLayout('persona:panel-layout:' + sessionId, {
   onStorageError: () => { status.textContent = 'Layout preferences could not be saved; editing remains available.'; }
@@ -125,6 +130,7 @@ const graphInspector = new GraphInspector({
   }
 });
 let graphMutationClient;
+let pendingViewportJump = null;
 const graphCanvas = new GraphCanvas({
   onSelection: nodes => {
     graphInspector.render(nodes, graphCanvas.projection, graphCanvas.liveNodeKeys);
@@ -148,7 +154,7 @@ const graphCanvas = new GraphCanvas({
       if (resource) { workspaceShell.openResource(resource); return; }
       yamlStatus.textContent = `Missing ${node.subtitle} ${node.title}. Use Create missing to add it safely.`;
     }
-    if(node.kind==='script-value'){const pin=(node.pins||[]).find(value=>value.direction==='output'&&value.channel==='DATA');const id=(node.fields||[]).find(field=>field.label==='value')?.value;if(pin&&id&&['quest','npc','behavior','dialogue','script'].includes(pin.valueType)){const resource=deriveResources(state.files).find(item=>item.kind===pin.valueType&&item.id===id);if(resource){workspaceShell.openResource(resource);return;}}}
+    if(node.kind==='script-value'){const pin=(node.pins||[]).find(value=>String(value.direction).toUpperCase()==='OUTPUT'&&value.channel==='DATA');const id=(node.fields||[]).find(field=>field.label==='value')?.value;if(pin&&id&&['quest','npc','behavior','dialogue','script'].includes(pin.valueType)){const resource=deriveResources(state.files).find(item=>item.kind===pin.valueType&&item.id===id);if(resource){workspaceShell.openResource(resource);return;}}}
     if (!node.yamlPath) return; revealSource(source, node.range);
   },
   onPin: pin => { status.textContent = `${String(pin.channel).toLowerCase()} ${pin.direction} pin ${pin.label} accepts ${pin.valueType} (${pin.cardinality}).`; },
@@ -158,18 +164,31 @@ const graphCanvas = new GraphCanvas({
   onConnectionError: message => { yamlStatus.textContent = `Connection rejected before changing YAML: ${message}`; status.textContent = message; },
   onConnect: gesture => commandDispatcher.execute('graph.connect', gesture),
   onInlineDefault: (pin, value) => graphMutationClient.mutate([
-    graphCanvas.projection?.resourceKind === 'script'
-      ? { type: 'SET_PIN_DEFAULT', targetPinId: pin.id, value }
-      : { type: 'EDIT_FIELD', yamlPath: pin.yamlPath, value }
+    inlineDefaultOperation(graphCanvas.projection, pin, value)
   ], `Set ${pin.label} value`),
   onResourceDrop: async (resource,position,targetPin) => { const key=`value-${crypto.randomUUID().replaceAll('-','').slice(0,8)}`;
-    const create={ type:'CREATE_VALUE_NODE',key,value:resource.id,valueType:resource.kind }, operations=targetPin
-      ? [{type:'COMPOUND',operationId:crypto.randomUUID(),children:[create,{type:'CONNECT',key:`wire-${crypto.randomUUID().replaceAll('-','').slice(0,12)}`,sourcePinId:`script:${graphCanvas.projection.resourceId}#node:${key}:output:value`,targetPinId:targetPin.id}]}]
+    const owner=targetPin?graphNodeByPin(targetPin):(graphCanvas.projection?.nodes||[]).find(node=>graphCanvas.selection.has(node.id))
+      ||(graphCanvas.projection?.nodes||[]).find(node=>['event','script-input'].includes(node.kind));
+    const descriptor=explicitGraphPath(owner,graphCanvas.projection);
+    if(descriptor==null){yamlStatus.textContent='Select an event or reusable graph before dropping a resource.';return;}
+    const parentYamlPath=`${descriptor}/nodes`.replace(/^\/\//,'/');
+    const create={ type:'CREATE_VALUE_NODE',parentYamlPath,key,value:resource.id,valueType:resource.kind }, operations=targetPin
+      ? [{type:'COMPOUND',operationId:crypto.randomUUID(),children:[create,{type:'CONNECT',key:`wire-${crypto.randomUUID().replaceAll('-','').slice(0,12)}`,sourcePinId:`${graphCanvas.projection.resourceKind}:${graphCanvas.projection.resourceId}#graph:${hex(await crypto.subtle.digest('SHA-256',encoder.encode(descriptor))).slice(0,10)}:node:${key}:output:value`,targetPinId:targetPin.id}]}]
       : [create];
     const result=await graphMutationClient.mutate(operations,`${targetPin?'Connect':'Add'} ${resource.id}`);
-    const node=result?.projection?.nodes?.find(candidate=>candidate.title===key);if(node){graphCanvas.positions[node.id]=position;graphCanvas.schedule();graphCanvas.changed();} },
+    placeCreatedGraphNode(result,key,position); },
   onDisconnect: edge => commandDispatcher.execute('graph.disconnect', edge),
-  onInsertWire: (edge, sourcePin) => commandDispatcher.execute('graph.add', { sourcePin, edge }),
+  onBreakLinks: (edges, pin) => graphMutationClient.mutate([
+    { type: 'BREAK_ALL_LINKS', [String(pin?.direction).toUpperCase() === 'OUTPUT' ? 'sourcePinId' : 'targetPinId']: pin?.id }
+  ], `Break ${(edges || []).length} link${(edges || []).length === 1 ? '' : 's'}`),
+  onMoveLinks: pin => moveAllPinLinks(pin),
+  onPromotePin: pin => promotePinToVariable(pin),
+  onTraceSelectionChange: () => { if (state.liveSubscription) refreshLiveSubscription(); },
+  viewportContext: () => ({ resourceIdentity: graphCanvas.projection?.resourceIdentity,
+    nestedGraph: state.nestedGraph ? structuredClone(state.nestedGraph) : null }),
+  viewportBookmarkKey: () => `persona:viewport-bookmarks:v1:${state.installationIdentity || sessionId}`,
+  onViewportJump: target => restoreViewportJump(target),
+  onInsertWire: (edge, sourcePin, pointer) => commandDispatcher.execute('graph.add', { sourcePin, edge, ...pointer }),
   onPalette: context => commandDispatcher.execute('graph.add', context),
   onNodeAction: action => commandDispatcher.execute('graph.node-action', action),
   onOpenRelationshipNode: node => openRelationshipNode(node),
@@ -186,7 +205,10 @@ const graphCanvas = new GraphCanvas({
     if (command.type === 'DELETE') commandDispatcher.execute('graph.delete', command.nodeIds);
     if (command.type === 'LAYOUT') { recordHistory(state.selected, command.before); appendGraphHistory('Local layout command', 'local'); }
     if (command.type === 'COPY') commandDispatcher.execute('graph.copy', command.nodeIds);
+    if (command.type === 'CUT' && copyGraphNode(command.nodeIds)) deleteGraphNodes(command.nodeIds);
     if (command.type === 'PASTE') commandDispatcher.execute('graph.paste');
+    if (command.type === 'DUPLICATE') duplicateGraphNodes(command.nodeIds);
+    if (command.type === 'RENAME') renameGraphNode(command.nodeId);
   }
 });
 
@@ -195,7 +217,7 @@ function refreshWorkspaceResources(activePath = state.selected) {
   const active = resources.find(resource => resource.path === activePath
     && (!state.pendingYamlPath || resource.yamlPath === state.pendingYamlPath))
     || resources.find(resource => resource.path === activePath);
-  workspaceShell.update(resources, active?.identity);
+  workspaceShell.update(resources, active?.identity, state.folders);
   return { resources, active };
 }
 
@@ -206,7 +228,7 @@ const sessionApi = path => transport.api(path);
 const authorizedHeaders = (values = {}) => transport.headers(values);
 const requireConnection = () => transport.requireConnection();
 const draftEditAllowed = () => state.connected && state.verified?.capabilities?.includes('DRAFT_EDIT');
-const draftEditRequiredMessage = 'Creating content requires Draft Edit trust. Approve DRAFT_EDIT in Minecraft, then wait for this session to refresh.';
+const draftEditRequiredMessage = 'Editing content requires Draft Edit trust. Approve DRAFT_EDIT in Minecraft, then wait for this session to refresh.';
 
 function requireDraftEdit() {
   requireConnection();
@@ -217,7 +239,7 @@ graphMutationClient = new GraphMutationClient({
   endpoint: () => sessionApi('/documents/mutate'),
   headers: authorizedHeaders,
   context: async () => {
-    requireConnection(); flushSelected();
+    requireConnection(); requireDraftEdit(); flushSelected();
     const resource = workspaceShell.activeResource(), projection = graphCanvas.projection;
     if (!resource || !projection || projection.resourceIdentity !== resource.identity)
       throw new Error('Wait for the authoritative graph projection before editing.');
@@ -229,6 +251,7 @@ graphMutationClient = new GraphMutationClient({
       isCurrent: () => state.connected && state.connectionGeneration === connectionGeneration
         && state.selected === selected && workspaceShell.activeResource()?.identity === resourceIdentity };
   },
+  forbiddenMessage: () => draftEditRequiredMessage,
   recordHistory: context => recordHistory(context.selected),
   rollbackHistory: context => { state.histories.get(context.selected)?.undo.pop(); updateHistoryButtons(); },
   onApplied: applyGraphMutationResult,
@@ -255,9 +278,9 @@ commandDispatcher
   .register('graph.delete', { label: 'Delete selected graph nodes', enabled: nodeIds => Boolean(nodeIds?.length)
       && hasGraphCapability(graphCanvas.projection, 'DELETE_NODE'),
     run: deleteGraphNodes })
-  .register('graph.copy', { label: 'Copy selected behavior node', enabled: nodeIds => Boolean(nodeIds?.length),
+  .register('graph.copy', { label: 'Copy selected graph nodes', enabled: nodeIds => Boolean(nodeIds?.length),
     run: copyGraphNode })
-  .register('graph.paste', { label: 'Paste compatible behavior node', enabled: () => Boolean(state.graphClipboard),
+  .register('graph.paste', { label: 'Paste compatible graph nodes', enabled: () => Boolean(state.graphClipboard),
     run: pasteGraphNode })
   .register('graph.align-left', { label: 'Align selected nodes left', enabled: () => graphCanvas.selection.size >= 2,
     run: () => graphCanvas.align('left') })
@@ -307,15 +330,14 @@ commandDispatcher
   .register('yaml.paste', { label: 'Paste YAML', enabled: () => state.connected, run: () => pasteButton.click() })
   .register('changes.text', { label: 'Show textual changes', run: () => { if (diff.hidden) diffToggle.click(); } })
   .register('download.file', { label: 'Download current file', run: () => download.click() })
-  .register('download.project', { label: 'Download complete project', run: () => exportAll.click() })
-  .register('download.changed', { label: 'Download changed files', run: () => exportChanged.click() })
   .register('references.open', { label: 'Show references and rename preview', run: () => referencesOpen.click() })
   .register('changes.semantic', { label: 'Show semantic project diff', run: () => semanticDiffOpen.click() })
-  .register('publish.request', { label: 'Request validated publication', enabled: () => !publishButton.disabled,
+  .register('publish.request', { label: 'Publish validated content', enabled: () => !publishButton.disabled,
     run: () => publishButton.click() });
 function lockWorkspace(message) {
   if (state.connected) persistRecovery();
   state.connected = false;
+  graphCanvas.traceRing = [];
   document.querySelector('#status-connection').textContent = 'Disconnected—editing stopped';
   state.connectionGeneration++;
   clearTimeout(state.autosaveTimer);
@@ -334,6 +356,7 @@ function lockWorkspace(message) {
   connectPanel.hidden = true;
   reconnectPanel.hidden = false;
   status.textContent = message;
+  reconnectReason.textContent = message;
   updateLifecycleButtons();
 }
 
@@ -341,11 +364,24 @@ const b64 = bytes => btoa(String.fromCharCode(...new Uint8Array(bytes)));
 const fromB64 = value => Uint8Array.from(atob(value), character => character.charCodeAt(0));
 const hex = bytes => [...new Uint8Array(bytes)].map(value => value.toString(16).padStart(2, '0')).join('');
 
+function snapshotFailureCloseReason(error) {
+  const prefix = 'Snapshot refresh failed: ';
+  let detail = String(error?.message || error || 'unknown error').replace(/[^\x20-\x7e]/g, '?');
+  while (encoder.encode(prefix + detail).length > 123) detail = detail.slice(0, -1);
+  return prefix + detail;
+}
+
+function parseProjectFolders(content) {
+  if (!content) return new Set();
+  return new Set(content.split(/\r?\n/).map(line => line.match(/^\s{2}-\s+([^#\s].*?)\s*$/)?.[1])
+    .filter(Boolean));
+}
+
 function flushSelected() {
   if (state.selected) state.files.set(state.selected, source.value);
 }
 
-function renderProject(files, message, revision = null) {
+function renderProject(files, message, revision = null, folders = [], manifestDigest = '') {
   requireConnection();
   const layoutScope = `${state.installationIdentity || sessionId}:persona-project`;
   panelLayout.rekey(`persona:panel-layout:v2:${layoutScope}`);
@@ -355,6 +391,8 @@ function renderProject(files, message, revision = null) {
   state.original = new Map(state.files);
   state.baseRevision = revision;
   state.currentRevision = revision;
+  state.folders = new Set(folders);
+  state.manifestDigest = manifestDigest;
   document.querySelector('#status-connection').textContent = 'Connected';
   document.querySelector('#status-revision').textContent = revision ? `Base ${revision.slice(0, 10)}` : 'Revision —';
   document.querySelector('#status-save').textContent = 'Saved';
@@ -422,9 +460,12 @@ function selectFile(path) {
   if (cachedGraph) {
     graphLayoutStore.scope = `${state.installationIdentity || sessionId}:persona-project`;
     const tabContext = state.graphTabContexts.get(cachedGraph.resourceIdentity);
-    graphCanvas.setProjection(cachedGraph, tabContext || null);
+    const jump = pendingViewportJump?.resourceIdentity === cachedGraph.resourceIdentity ? pendingViewportJump : null;
+    if (jump) restoreNestedBookmark(jump);
+    graphCanvas.setProjection(jump ? visibleGraphProjection(cachedGraph) : cachedGraph, tabContext || null);
+    if (jump) { graphCanvas.restoreViewport(jump.viewport); pendingViewportJump = null; }
     graphLayoutStore.load(cachedGraph).then(layout => {
-      if (layout && workspaceShell.activeResource()?.identity === cachedGraph.resourceIdentity && !tabContext)
+      if (layout && workspaceShell.activeResource()?.identity === cachedGraph.resourceIdentity && !tabContext && !jump)
         graphCanvas.setProjection(cachedGraph, layout);
     });
   } else graphCanvas.clear();
@@ -612,53 +653,37 @@ function selectVisualNode(path, syncGraph = true) {
 }
 
 function renderDocument(model) {
-  if (!model?.root) { visual.replaceChildren();visualTools.hidden=true; return; }
+  if (!model?.root) { visual.replaceChildren(); return; }
   const ids=[];const gather=node=>{if(node.kind==='mapping'){const id=node.children?.find(child=>child.key==='id')?.value;if(id)ids.push(id);}for(const child of node.children||[])gather(child);};gather(model.root);state.duplicateNodeIds=new Set(ids.filter((id,index)=>ids.indexOf(id)!==index));
   visual.replaceChildren(renderVisualNode(model.root));
-  refreshVisualTools(model);
   renderInsights(model);
   if (state.selectedNode) selectVisualNode(state.selectedNode);
   overlayLiveBehaviorNodes();
 }
 function modelValue(node){if(!node)return null;if(node.kind==='mapping')return Object.fromEntries(node.children.map(child=>[child.key,modelValue(child)]));if(node.kind==='sequence')return node.children.map(modelValue);if(node.kind==='boolean')return node.value==='true';if(node.kind==='integer'||node.kind==='number')return Number(node.value);if(node.kind==='null')return null;return node.value;}
 function graphCard(label,problem=false){const card=document.createElement('span');card.className=`graph-node${problem?' problem':''}`;card.textContent=label;return card;}
-function nestedSteps(value,result=[]){if(Array.isArray(value))for(const step of value){if(step&&typeof step==='object'){result.push(step);for(const key of ['then','else','script','on-success','on-failure'])nestedSteps(step[key],result);for(const option of step.options||[])nestedSteps(option.script,result);}}return result;}
+function graphNodes(graph){return Object.values(graph?.nodes||{}).filter(node=>node&&typeof node==='object');}
 function renderInsights(model){const value=modelValue(model.root),kind=editorKind();insightsTitle.textContent=`${kind[0].toUpperCase()+kind.slice(1)} structure`;visualGraph.replaceChildren();visualPreview.replaceChildren();if(kind==='behavior')renderBehaviorInsights(value);else if(kind==='dialogue')renderDialogueInsights(value);else if(kind==='quest')renderQuestInsights(value);else if(kind==='npc')renderNpcInsights(value);else renderScriptInsights(value);}
 function renderBehaviorInsights(value){const nodes=[];const walk=node=>{if(!node||typeof node!=='object')return;nodes.push(node);for(const child of node.children||[])walk(child);walk(node.child);};walk(value.root);for(const node of nodes){const persistence=['checkpoint','wait','cooldown'].includes(node.type)?' · durable checkpoint/deadline':['action','condition'].includes(node.type)?' · transient':'',semantics=node.type==='sequence'?' · ordered':node.type?.includes('selector')?' · priority':node.type==='parallel'?` · success ${node['success-threshold']||'all'}, failure ${node['failure-threshold']||1}`:'';visualGraph.append(graphCard(`${node.id||'?'} · ${node.type||'?'}${semantics}${persistence}`));}visualPreview.textContent=`${value.scope||'player'} scope · ${nodes.length} nodes · placeholders: <player>, <npc>, <memory:key>, <npc-memory:key>, <event:key>`;}
-function dialogueEdges(nodes){const edges=new Map();for(const [id,node] of Object.entries(nodes||{})){const outgoing=nestedSteps(node.script||[]).filter(step=>step.type==='goto').map(step=>step.dialogue?`${step.dialogue}/${step.node||'start'}`:step.node).filter(Boolean);edges.set(id,outgoing);}return edges;}
-function renderDialogueInsights(value){const nodes=value.nodes||{},edges=dialogueEdges(nodes),reachable=new Set(),visiting=new Set(),loops=new Set(),visit=id=>{if(!id||!nodes[id])return;if(visiting.has(id)){loops.add(id);return;}if(reachable.has(id))return;reachable.add(id);visiting.add(id);for(const next of edges.get(id)||[])if(!next.includes('/'))visit(next);visiting.delete(id);};visit(value.start);for(const [id,outgoing] of edges){const missing=outgoing.some(next=>!next.includes('/')&&!nodes[next]),unreachable=!reachable.has(id),dead=!nestedSteps(nodes[id].script||[]).some(step=>['goto','end-dialogue'].includes(step.type)),loop=loops.has(id)||outgoing.some(next=>loops.has(next));visualGraph.append(graphCard(`${id}${outgoing.length?` → ${outgoing.join(', ')}`:''}${unreachable?' · unreachable':''}${dead?' · implicit end':''}${loop?' · transfer loop':''}`,missing||unreachable||loop));}const lines=nestedSteps(Object.values(nodes).flatMap(node=>node.script||[])).filter(step=>step.type==='say').map(step=>{const translations=Object.entries(step.translations||{}).map(([locale,text])=>`${locale}=${text}`).join(', ');return`${step.text||step['text-key']||'(weighted variants)'}${translations?` {${translations}}`:''}${step.delay?` [${step.delay}]`:''}`;});visualPreview.textContent=`Preview lines / localization keys:\n${lines.join('\n')||'(none)'}\nPlaceholders: <player>, <npc>, <dialogue>, <quest>, <phase>, <objective>, <current>, <required>, <memory:key>`;}
+function dialogueEdges(nodes){const edges=new Map();for(const [id,entry] of Object.entries(nodes||{})){const outgoing=graphNodes(entry.graph).filter(node=>node.type==='goto').map(node=>node.dialogue?`${node.dialogue}/${node.node||'start'}`:node.node).filter(Boolean);edges.set(id,outgoing);}return edges;}
+function renderDialogueInsights(value){const nodes=value.nodes||{},edges=dialogueEdges(nodes),targets=new Set([...edges.values()].flat().filter(target=>!target.includes('/')));for(const [id,outgoing] of edges){const commands=graphNodes(nodes[id]?.graph),missing=outgoing.some(next=>!next.includes('/')&&!nodes[next]),unreachable=id!==value.start&&!targets.has(id),dead=!commands.some(step=>['goto','end-dialogue'].includes(step.type));visualGraph.append(graphCard(`${id}${outgoing.length?` → ${outgoing.join(', ')}`:''}${unreachable?' · unreachable':''}${dead?' · implicit end':''}`,missing||unreachable));}const lines=Object.values(nodes).flatMap(node=>graphNodes(node.graph)).filter(step=>step.type==='say').map(step=>{const translations=Object.entries(step.translations||{}).map(([locale,text])=>`${locale}=${text}`).join(', ');return`${step.text||step['text-key']||'(weighted variants)'}${translations?` {${translations}}`:''}${step.delay?` [${step.delay}]`:''}`;});visualPreview.textContent=`Preview lines / localization keys:\n${lines.join('\n')||'(none)'}\nPlaceholders: <player>, <npc>, <dialogue>, <quest>, <phase>, <objective>, <current>, <required>, <memory:key>`;}
 function renderQuestInsights(value){const phases=value.phases||[],ids=new Set(phases.map(phase=>phase.id)),reachable=new Set();const visit=id=>{if(!id||id==='end'||reachable.has(id)||!ids.has(id))return;reachable.add(id);const index=phases.findIndex(phase=>phase.id===id),phase=phases[index];for(const branch of phase.branches||[])visit(branch['next-phase']);if(index+1<phases.length)visit(phases[index+1].id);};visit(phases[0]?.id);phases.forEach((phase,index)=>{const destinations=(phase.branches||[]).map(branch=>branch['next-phase']).filter(Boolean),invalid=destinations.some(id=>id!=='end'&&!ids.has(id)),impossible=(phase.branches||[]).some(branch=>branch.when?.type==='chance'&&Number(branch.when.chance)<=0),unreachable=!reachable.has(phase.id);visualGraph.append(graphCard(`${phase.id||'?'} → ${destinations.join(', ')||phases[index+1]?.id||'end'} · ${(phase.objectives||[]).length} objectives${impossible?' · impossible branch':''}${unreachable?' · unreachable':''}`,invalid||impossible||unreachable));});const objectives=phases.flatMap(phase=>(phase.objectives||[]).map(objective=>`${phase.id}/${objective.id}: ${objective.type}, ${objective.optional?'optional':'required'}, ${objective.hidden?'hidden':'visible'}, target ${objective.amount||objective.duration||1}`));visualPreview.textContent=`Requirements: ${JSON.stringify(value.when||value.requirements||'none')}\nTimer: ${value['time-limit']||'none'} · repeatable: ${value.repeatable||false} · cooldown: ${value.cooldown||'none'} · maximum completions: ${value['maximum-completions']||'unlimited'}\n${objectives.join('\n')}\nPlaceholders: <player>, <quest>, <phase>, <objective>, <current>, <required>, <memory:key>`;}
 function renderNpcInsights(value){const definition=value.id,live=[...state.liveData.npcs.values()].filter(npc=>npc.definitionId===definition),anchors=Object.entries(value.anchors||{}),table=document.createElement('table');table.className='anchor-table';table.innerHTML='<tr><th>Anchor</th><th>World / coordinates</th><th></th></tr>';for(const [name,anchor] of anchors){const actor=live.find(npc=>!npc.playerId),far=actor?.position&&actor.position.world===anchor.world?Math.hypot(actor.position.x-anchor.x,actor.position.y-anchor.y,actor.position.z-anchor.z)>48:false,row=document.createElement('tr'),label=document.createElement('td'),position=document.createElement('td'),action=document.createElement('td'),button=document.createElement('button');label.textContent=name+(far?' ⚠ far from actor':'');position.textContent=`${anchor.world} ${anchor.x} ${anchor.y} ${anchor.z} ${anchor.yaw||0} ${anchor.pitch||0}`;button.type='button';button.textContent='Paste coordinates';button.addEventListener('click',()=>importAnchor(name));action.append(button);row.append(label,position,action);table.append(row);}visualGraph.append(table);if(anchors.length){const map=document.createElement('div');map.className='anchor-map';const xs=anchors.map(([,a])=>Number(a.x)),zs=anchors.map(([,a])=>Number(a.z)),minX=Math.min(...xs),maxX=Math.max(...xs),minZ=Math.min(...zs),maxZ=Math.max(...zs);for(const [name,anchor] of anchors){const point=document.createElement('span');point.className='anchor-point';point.style.left=`${5+90*(Number(anchor.x)-minX)/(maxX-minX||1)}%`;point.style.top=`${5+90*(Number(anchor.z)-minZ)/(maxZ-minZ||1)}%`;point.textContent=name;point.title=`${anchor.world}: ${anchor.x}, ${anchor.y}, ${anchor.z}`;map.append(point);}visualGraph.append(map);}const presentations=live.map(npc=>`${npc.playerId||'shared'}: ${npc.presentation}/${npc.projectionState}, ${npc.entityName||value['display-name']||''} ${npc.entityType||''}, skin ${npc.skin||'none'}, equipment ${JSON.stringify(npc.equipment||{})}, age ${npc.age??'n/a'}, pose ${npc.pose||'n/a'}`);visualPreview.textContent=`Definition ${definition||'?'} · display ${value['display-name']||''}\nshared behavior ${value['shared-behavior']||'none'} · player behavior ${value['player-behavior']||'none'}\n${presentations.join('\n')||'Open a trusted live subscription to preview shared/private Citizens presentation.'}`;}
-function renderScriptInsights(value){const scripts=value.scripts||{};for(const [id,steps] of Object.entries(scripts))visualGraph.append(graphCard(`${id} · ${(steps||[]).length} blocks`));visualPreview.textContent='Available placeholders depend on the caller: common <player>; dialogue <npc>/<dialogue>; quest <quest>/<phase>/<objective>/<current>/<required>; memory <memory:key>/<npc-memory:key>.';}
+function renderScriptInsights(value){for(const [id,node] of Object.entries(value.nodes||{}))visualGraph.append(graphCard(`${id} · ${node.type||'unknown'}`));visualPreview.textContent=`${Object.keys(value.inputs||{}).length} inputs · ${Object.keys(value.outputs||{}).length} outputs · ${Object.keys(value.variables||{}).length} local variables · ${Object.keys(value.connections||{}).length} explicit wires.`;}
 async function importAnchor(name){const raw=prompt('Paste “x y z [yaw pitch]” or a Minecraft /tp command');if(!raw)return;const numbers=raw.match(/-?\d+(?:\.\d+)?/g)?.map(Number);if(!numbers||numbers.length<3){yamlStatus.textContent='Could not find at least x, y, and z coordinates.';return;}const values=numbers.slice(-5),xyz=values.length>=5?values:values.slice(0,3);for(const [field,value] of [['x',xyz[0]],['y',xyz[1]],['z',xyz[2]],['yaw',values.length>=5?values[3]:0],['pitch',values.length>=5?values[4]:0]])await applyVisualEdit(`/anchors/${name.replaceAll('~','~0').replaceAll('/','~1')}/${field}`,String(value));}
 function runSimulation(input, output) { try { const mocks=JSON.parse(input.value),model=state.documentModels.get(state.selected),value=modelValue(model.root);output.textContent=JSON.stringify(simulate(editorKind(),value,mocks),null,2); } catch(error) { output.textContent=`Simulation input error: ${error.message}`; } }
 document.querySelector('#simulate-open').addEventListener('click',()=>showOutput('simulation'));document.querySelector('#simulation-close').addEventListener('click',()=>simulationDialog.close());document.querySelector('#simulation-run').addEventListener('click',()=>runSimulation(simulationInput,simulationOutput));
 document.querySelector('#simulation-dock-run').addEventListener('click',()=>runSimulation(document.querySelector('#simulation-dock-input'),document.querySelector('#simulation-dock-output')));
 function testCondition(condition,mocks){if(!condition)return true;if(Array.isArray(condition))return condition.every(item=>testCondition(item,mocks));switch(condition.type){case'all':return(condition.conditions||[]).every(item=>testCondition(item,mocks));case'any':return(condition.conditions||[]).some(item=>testCondition(item,mocks));case'not':return!testCondition(condition.when||condition.condition,mocks);case'flag':return Boolean(mocks.flags?.[condition.name])===Boolean(condition.value??true);case'variable':return String(mocks.variables?.[condition.name]??'')===String(condition.value??'');case'quest-state':return String(mocks.quests?.[condition.quest]??'not-started')===String(condition.state);case'memory':return String(mocks.memories?.[condition.key]??'')===String(condition.value??true);case'event':return(mocks.events||[]).includes(condition.event||condition.name);case'chance':return Number(mocks.chance??0.5)<Number(condition.chance??0);default:return Boolean(mocks.conditions?.[condition.type]);}}
-function simulate(kind,value,mocks){if(kind==='behavior')return simulateBehavior(value,mocks);if(kind==='dialogue')return simulateDialogue(value,mocks);if(kind==='quest')return simulateQuest(value,mocks);return{kind,steps:nestedSteps(kind==='script'?Object.values(value.scripts||{}).flat():[value]).map(step=>step.type),note:'Preview is deterministic and performs no server mutations.'};}
+function simulate(kind,value,mocks){if(kind==='behavior')return simulateBehavior(value,mocks);if(kind==='dialogue')return simulateDialogue(value,mocks);if(kind==='quest')return simulateQuest(value,mocks);const graphs=kind==='npc'?[value['on-click'],value['on-damage'],value['on-spawn'],value['on-despawn'],value['on-no-dialogue']]:[value];return{kind,nodes:graphs.flatMap(graph=>graphNodes(graph)).map(node=>node.type),note:'Preview is deterministic and performs no server mutations.'};}
 function simulateBehavior(value,mocks){const trace=[];const run=node=>{if(!node)return'FAILURE';let status='SUCCESS';switch(node.type){case'condition':status=testCondition({...node,type:node.condition},mocks)?'SUCCESS':'FAILURE';break;case'wait':status='RUNNING';break;case'action':status=String(mocks.actions?.[node.action]||'SUCCESS');break;case'sequence':for(const child of node.children||[]){status=run(child);if(status!=='SUCCESS')break;}break;case'selector':case'priority-selector':status='FAILURE';for(const child of node.children||[]){const next=run(child);if(next!=='FAILURE'){status=next;break;}}break;case'parallel':{const results=(node.children||[]).map(run),success=results.filter(item=>item==='SUCCESS').length,failure=results.filter(item=>item==='FAILURE').length;status=success>=Number(node['success-threshold']||results.length)?'SUCCESS':failure>=Number(node['failure-threshold']||1)?'FAILURE':'RUNNING';break;}case'invert':status=run(node.child);status=status==='SUCCESS'?'FAILURE':status==='FAILURE'?'SUCCESS':status;break;case'repeat':case'retry':case'timeout':case'cooldown':case'checkpoint':status=run(node.child);break;case'subtree':status=String(mocks.subtrees?.[node.subtree]||'RUNNING');break;default:status='FAILURE';}trace.push({id:node.id,type:node.type,status});return status;};return{status:run(value.root),trace,mockMemories:mocks.memories||{},events:mocks.events||[]};}
 function interpolate(text,mocks){return String(text??'').replace(/<([^>]+)>/g,(all,key)=>{const [group,name]=key.split(':',2);return name!=null?mocks[group]?.[name]??all:mocks[key]??all;});}
-function simulateDialogue(value,mocks){const transcript=[],visited=[];let nodeId=value.start,steps=0;while(nodeId&&value.nodes?.[nodeId]&&steps++<64){if(visited.includes(nodeId))return{status:'TRANSFER_LOOP',visited:[...visited,nodeId],transcript};visited.push(nodeId);let jump=null;for(const step of value.nodes[nodeId].script||[]){if(step.type==='say')transcript.push({line:interpolate(step.text||'(weighted variant)',mocks),delay:step.delay||'default'});else if(step.type==='choice'){const eligible=(step.options||[]).filter(option=>testCondition(option.when,mocks));transcript.push({choices:eligible.map(option=>interpolate(option.text,mocks))});const selected=eligible[Number(mocks.choice||0)];for(const nested of selected?.script||[])if(nested.type==='goto')jump=nested.node;}else if(step.type==='if'){const chosen=testCondition(step.when,mocks)?step.then:step.else;for(const nested of chosen||[])if(nested.type==='goto')jump=nested.node;}else if(step.type==='goto')jump=step.dialogue?`${step.dialogue}/${step.node||'start'}`:step.node;else if(step.type==='end-dialogue')return{status:'ENDED',visited,transcript};}if(jump?.includes('/'))return{status:'TRANSFER',target:jump,visited,transcript};nodeId=jump;}return{status:steps>=64?'TRANSITION_LIMIT':'IMPLICIT_END',visited,transcript};}
-function simulateQuest(value,mocks){const transitions=[],memoryChanges=[];for(const phase of value.phases||[]){const objectives=(phase.objectives||[]).map(objective=>({id:objective.id,type:objective.type,current:Number(mocks.objectives?.[objective.id]||0),required:Number(objective.amount||objective['required-progress']||parseFloat(objective.duration)||1),optional:Boolean(objective.optional),hidden:Boolean(objective.hidden)}));const complete=objectives.filter(item=>!item.optional).every(item=>item.current>=item.required);transitions.push({phase:phase.id,objectives,complete});if(!complete)break;const branch=(phase.branches||[]).find(item=>testCondition(item.when,mocks));if(branch)transitions.at(-1).next=branch['next-phase'];for(const step of nestedSteps(phase['on-complete']||[]))if(['set-variable','set-flag'].includes(step.type))memoryChanges.push({type:step.type,name:step.name||step.flag,value:step.value});if(branch?.['next-phase']==='end')break;}return{requirements:testCondition(value.when||value.requirements,mocks),transitions,resultingChanges:memoryChanges,repeatable:Boolean(value.repeatable),timer:value['time-limit']||null};}
+function simulateDialogue(value,mocks){const transcript=[],visited=[];let nodeId=value.start,steps=0;while(nodeId&&value.nodes?.[nodeId]&&steps++<64){if(visited.includes(nodeId))return{status:'TRANSFER_LOOP',visited:[...visited,nodeId],transcript};visited.push(nodeId);const commands=graphNodes(value.nodes[nodeId].graph),lines=commands.filter(node=>node.type==='say');for(const line of lines)transcript.push({line:interpolate(line.text||line['text-key']||'(weighted variant)',mocks),delay:line.delay||'default'});if(commands.some(node=>node.type==='end-dialogue'))return{status:'ENDED',visited,transcript};const transfer=commands.find(node=>node.type==='goto');if(!transfer)return{status:'IMPLICIT_END',visited,transcript};const jump=transfer.dialogue?`${transfer.dialogue}/${transfer.node||'start'}`:transfer.node;if(jump?.includes('/'))return{status:'TRANSFER',target:jump,visited,transcript};nodeId=jump;}return{status:steps>=64?'TRANSITION_LIMIT':'IMPLICIT_END',visited,transcript};}
+function simulateQuest(value,mocks){const transitions=[],lifecycleNodes=[];for(const phase of value.phases||[]){const objectives=(phase.objectives||[]).map(objective=>({id:objective.id,type:objective.type,current:Number(mocks.objectives?.[objective.id]||0),required:Number(objective.amount||objective['required-progress']||parseFloat(objective.duration)||1),optional:Boolean(objective.optional),hidden:Boolean(objective.hidden)}));const complete=objectives.filter(item=>!item.optional).every(item=>item.current>=item.required);transitions.push({phase:phase.id,objectives,complete});lifecycleNodes.push(...graphNodes(phase['on-start']),...graphNodes(phase['on-complete']));if(!complete)break;const branch=(phase.branches||[]).find(item=>testCondition(item.when,mocks));if(branch)transitions.at(-1).next=branch['next-phase'];if(branch?.['next-phase']==='end')break;}return{requirements:testCondition(value.when,mocks),transitions,lifecycleNodes:lifecycleNodes.map(node=>node.type),repeatable:Boolean(value.repeatable),timer:value['time-limit']||null};}
 function openBehavior(id){for(const [path,model] of state.documentModels){if(path.startsWith('behaviors/')&&model.root?.children?.find(child=>child.key==='id')?.value===id){selectFile(path);return;}}for(const path of state.files.keys())if(path.startsWith('behaviors/')){const text=state.files.get(path);if(new RegExp(`^id:\\s*["']?${id.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}["']?\\s*$`,'m').test(text)){selectFile(path);return;}}yamlStatus.textContent=`Referenced subtree ${id} is not present in this project.`;}
 
-function editorKind(){return state.selected?.startsWith('behaviors/')?'behavior':state.selected?.startsWith('npcs/')?'npc':state.selected?.startsWith('dialogues/')?'dialogue':state.selected?.startsWith('quests/')?'quest':state.selected?.endsWith('scripts.yml')?'script':'generic';}
+function editorKind(){return state.selected?.startsWith('behaviors/')?'behavior':state.selected?.startsWith('npcs/')?'npc':state.selected?.startsWith('dialogues/')?'dialogue':state.selected?.startsWith('quests/')?'quest':state.selected?.startsWith('scripts/')?'script':'generic';}
 function collectContainers(node,result=[]){if(node.kind==='sequence'||node.kind==='mapping')result.push(node);for(const child of node.children||[])collectContainers(child,result);return result;}
-function visualTemplates(){const id=()=>`node-${crypto.randomUUID().slice(0,8)}`,kind=editorKind(),items=[];if(kind==='behavior')items.push(
-  {label:'Composite · sequence',kind:'sequence',yaml:()=>`- id: ${id()}\n  type: sequence\n  children:\n    - id: ${id()}\n      type: action\n      action: set-visible\n      visible: true`},
-  {label:'Composite · selector',kind:'sequence',yaml:()=>`- id: ${id()}\n  type: selector\n  children:\n    - id: ${id()}\n      type: condition\n      condition: chance\n      chance: 1.0`},
-  {label:'Decorator · invert',kind:'sequence',yaml:()=>`- id: ${id()}\n  type: invert\n  child:\n    id: ${id()}\n    type: condition\n    condition: chance\n    chance: 0.5`},
-  {label:'Leaf · action',kind:'sequence',yaml:()=>`- id: ${id()}\n  type: action\n  action: set-visible\n  visible: true`},
-  {label:'Leaf · condition',kind:'sequence',yaml:()=>`- id: ${id()}\n  type: condition\n  condition: chance\n  chance: 0.5`},
-  {label:'Subtree reference',kind:'sequence',yaml:()=>`- id: ${id()}\n  type: subtree\n  subtree: namespace:behavior`});
-if(kind==='npc')items.push({label:'Dialogue registration',kind:'sequence',yaml:()=>'- id: namespace:dialogue\n  priority: 0'},{label:'Hook script block',kind:'sequence',yaml:()=>'- type: message\n  text: "New NPC hook"'},{label:'Named anchor',kind:'mapping',key:()=>prompt('Stable anchor name','new-anchor'),yaml:()=>'{ world: world, x: 0, y: 64, z: 0, yaw: 0, pitch: 0 }'});
-if(kind==='dialogue')items.push({label:'Dialogue node',kind:'mapping',key:()=>prompt('Stable node ID',id()),yaml:()=>`script:\n  - type: say\n    text: "New dialogue line"`},{label:'Say block',kind:'sequence',yaml:()=>'- type: say\n  text: "New dialogue line"'},{label:'Choice block',kind:'sequence',yaml:()=>'- type: choice\n  options:\n    - text: "Continue"\n      script:\n        - type: end-dialogue'},{label:'Transfer block',kind:'sequence',yaml:()=>'- type: goto\n  node: destination'});
-if(kind==='quest')items.push({label:'Quest phase',kind:'sequence',yaml:()=>`- id: ${id()}\n  title: "New phase"\n  objectives:\n    - id: ${id()}\n      type: wait\n      duration: 1s`},{label:'Objective · collect item',kind:'sequence',yaml:()=>`- id: ${id()}\n  type: collect-item\n  material: minecraft:stone\n  amount: 1`},{label:'Phase branch',kind:'sequence',yaml:()=>'- next-phase: end\n  when:\n    type: chance\n    chance: 1.0'},{label:'Lifecycle script block',kind:'sequence',yaml:()=>'- type: message\n  text: "Quest updated"'});
-if(kind==='script'||['npc','dialogue','quest'].includes(kind))items.push({label:'Script · message',kind:'sequence',yaml:()=>'- type: message\n  text: "New message"'},{label:'Script · if',kind:'sequence',yaml:()=>'- type: if\n  when:\n    type: chance\n    chance: 1.0\n  then:\n    - type: message\n      text: "Condition passed"'},{label:'Script · random',kind:'sequence',yaml:()=>'- type: random\n  options:\n    - weight: 1\n      script:\n        - type: message\n          text: "Random branch"'},{label:'Reusable script',kind:'mapping',key:()=>prompt('Reusable script ID','new-script'),yaml:()=>'- type: message\n  text: "New reusable script"'});
-for(const schema of state.editorSchemas.values()){const label=`Extension · ${schema.contentType} · ${schema.typeId}`;if(kind==='behavior'&&schema.contentType==='behavior-action')items.push({label,kind:'sequence',yaml:()=>`- id: ${id()}\n  type: action\n  action: ${schema.typeId}`});else if(kind==='behavior'&&schema.contentType==='behavior-condition')items.push({label,kind:'sequence',yaml:()=>`- id: ${id()}\n  type: condition\n  condition: ${schema.typeId}`});else if(schema.contentType==='command')items.push({label,kind:'sequence',yaml:()=>`- type: ${schema.typeId}`});else if(kind==='quest'&&schema.contentType==='objective')items.push({label,kind:'sequence',yaml:()=>`- id: ${id()}\n  type: ${schema.typeId}`});}
-return items;}
-function refreshVisualTools(){visualTools.hidden=true;visualContainer.replaceChildren();visualTemplate.replaceChildren();}
-visualTools.addEventListener('submit',event=>{event.preventDefault();commandDispatcher.execute('graph.add',{sourcePin:null});});
 
 function overlayLiveBehaviorNodes(){
   visual.querySelectorAll('.yaml-node.live-active').forEach(node=>node.classList.remove('live-active'));
@@ -728,9 +753,27 @@ function visibleGraphProjection(full) {
 }
 
 function showGraphProjection(full, layout) {
+  const jump = pendingViewportJump?.resourceIdentity === full.resourceIdentity ? pendingViewportJump : null;
+  if (jump) restoreNestedBookmark(jump);
   const visible = visibleGraphProjection(full);
   graphCanvas.setProjection(visible, layout);
+  if (jump) { graphCanvas.restoreViewport(jump.viewport); pendingViewportJump = null; }
   graphCanvas.setDiagnosticPaths(visible.diagnostics.map(issue => issue.yamlPath));
+}
+
+function restoreNestedBookmark(target) {
+  state.nestedGraph = target.nestedGraph ? structuredClone(target.nestedGraph) : null;
+  workspaceShell.setNestedBreadcrumbs(state.nestedGraph
+    ? [{ label: state.nestedGraph.label || 'Nested graph' }] : []);
+}
+
+function restoreViewportJump(target) {
+  const resource = deriveResources(state.files).find(item => item.identity === target.resourceIdentity);
+  if (!resource) { yamlStatus.textContent = `Viewport bookmark “${target.name}” references a missing resource.`; return; }
+  pendingViewportJump = target; restoreNestedBookmark(target);
+  if (workspaceShell.activeResource()?.identity !== resource.identity) { workspaceShell.openResource(resource); return; }
+  const full = state.graphProjections.get(resource.identity);
+  if (full) showGraphProjection(full, graphCanvas.snapshot());
 }
 
 async function applyGraphMutationResult(result, { label, context }) {
@@ -751,7 +794,7 @@ async function applyGraphMutationResult(result, { label, context }) {
   renderDocument(result.document);
   showGraphProjection(result.projection, layout);
   const focusedId = Object.values(result.identityRemap || {})[0];
-  if (focusedId) { graphCanvas.select(focusedId, false); graphCanvas.focusNode(focusedId); }
+  if (focusedId) graphCanvas.select(focusedId, false);
   graphCanvas.setStale(false);
   refreshWorkspaceResources(); refreshProjectReferences(); invalidateValidation();
   refreshDirty(); scheduleAutosave(); scheduleRecovery(); updateHistoryButtons();
@@ -777,35 +820,99 @@ function deleteGraphNodes(nodeIds) {
 }
 
 function copyGraphNode(nodeIds = [...graphCanvas.selection]) {
-  const node = (graphCanvas.projection?.nodes || []).find(value => nodeIds.includes(value.id));
+  const selected = (graphCanvas.projection?.nodes || []).filter(value => nodeIds.includes(value.id)
+    && value.yamlPath && !value.custom && !(value.badges || []).includes('non-deletable'));
+  const node = selected[0];
   const resource = workspaceShell.activeResource();
-  if (!resource || resource.kind !== 'behavior' || !node?.yamlPath?.startsWith('/root/children/') || node.custom) {
-    yamlStatus.textContent = 'Visual copy currently accepts one complete behavior child node.'; return;
+  if (!resource || !node) { yamlStatus.textContent = 'Select one or more complete editable graph nodes.'; return false; }
+  if (resource.kind === 'behavior') {
+    if (selected.length !== 1 || !node.yamlPath.startsWith('/root/children/')) {
+      yamlStatus.textContent = 'Behaviour copy accepts one complete child branch.'; return false;
+    }
+    state.graphClipboard = { resourceKind: 'behavior', sourceFilePath: resource.path,
+      yamlPath: node.yamlPath, nodeKind: node.kind, title: node.title };
+    status.textContent = `Copied behavior node ${node.title}; choose a compatible behavior container and paste.`;
+    return true;
   }
-  state.graphClipboard = { resourceKind: 'behavior', sourceFilePath: resource.path,
-    yamlPath: node.yamlPath, nodeKind: node.kind, title: node.title };
-  status.textContent = `Copied behavior node ${node.title}; choose a compatible behavior container and paste.`;
+  if (!['npc','dialogue','quest','script'].includes(resource.kind)) return false;
+  const descriptors = new Set(selected.map(value => explicitGraphPath(value, graphCanvas.projection)));
+  if (descriptors.size !== 1 || descriptors.has(null) || selected.some(value => !value.yamlPath.includes('/nodes/'))) {
+    yamlStatus.textContent = 'Graph copy requires nodes from one explicit event or reusable graph.'; return false;
+  }
+  const selectedIds = new Set(selected.map(value => value.id));
+  const pins = new Map(selected.flatMap(value => (value.pins || []).map(pin => [pin.id, { nodeId: value.id,
+    direction: pin.direction, label: pin.label }])));
+  const edges = (graphCanvas.projection.edges || []).filter(edge => pins.has(edge.sourcePinId) && pins.has(edge.targetPinId)
+    && selectedIds.has(pins.get(edge.sourcePinId).nodeId) && selectedIds.has(pins.get(edge.targetPinId).nodeId)
+    && edge.id.startsWith('graph-edge:')).map(edge => ({ source: pins.get(edge.sourcePinId), target: pins.get(edge.targetPinId) }));
+  state.graphClipboard = { resourceKind: 'graph', sourceFilePath: resource.path, sourceKind: resource.kind,
+    nodes: selected.map(value => ({ id: value.id, yamlPath: value.yamlPath, title: value.title })), edges };
+  status.textContent = `Copied ${selected.length} graph node${selected.length === 1 ? '' : 's'} and ${edges.length} internal wire${edges.length === 1 ? '' : 's'}.`;
+  return true;
 }
 
-function pasteGraphNode() {
+async function pasteGraphNode() {
   const copied = state.graphClipboard;
-  if (!copied || graphCanvas.projection?.resourceKind !== 'behavior') {
+  if (!copied) { yamlStatus.textContent = 'The graph clipboard is empty.'; return; }
+  if (copied.resourceKind === 'behavior') {
+    if (graphCanvas.projection?.resourceKind !== 'behavior') {
+      yamlStatus.textContent = 'The copied behavior node is not compatible with this resource.'; return;
+    }
+    const insertion = graphInsertion({ nodeKind: copied.nodeKind, destination: 'children' }, null);
+    if (!insertion) { yamlStatus.textContent = 'Select a compatible behavior container before pasting.'; return; }
+    const key = automaticNodeId({ label: `${copied.title}-copy` }, graphCanvas.projection?.nodes);
+    await graphMutationClient.mutate([{ type: 'COPY', yamlPath: copied.yamlPath,
+      sourceFilePath: copied.sourceFilePath, parentYamlPath: insertion.parentYamlPath,
+      key, index: insertion.index }], 'Paste copied behavior node'); return;
+  }
+  if (!['npc','dialogue','quest','script'].includes(graphCanvas.projection?.resourceKind)) {
     yamlStatus.textContent = 'The copied graph node is not compatible with this resource.'; return;
   }
-  const insertion = graphInsertion({ nodeKind: copied.nodeKind, destination: 'children' }, null);
-  if (!insertion) { yamlStatus.textContent = 'Select a compatible behavior container before pasting.'; return; }
-  const key = prompt('Stable ID for the copied node', `${copied.title}-copy`)?.trim();
-  if (!key) return;
-  if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(key)) {
-    yamlStatus.textContent = 'Node IDs use lowercase letters, digits, dot, underscore, and hyphen.'; return;
+  const insertion = graphInsertion({ destination: 'graph', nodeKind: 'script-value' }, null);
+  if (!insertion) { yamlStatus.textContent = 'Select the destination event or reusable graph before pasting.'; return; }
+  const existing = new Set((graphCanvas.projection.nodes || []).filter(value => value.yamlPath?.startsWith(insertion.parentYamlPath + '/')).map(value => value.title));
+  const keyById = new Map(), operations = [];
+  for (const source of copied.nodes) {
+    const base=String(source.title||'node').toLowerCase().replace(/[^a-z0-9_.-]+/g,'-').replace(/^-+|-+$/g,'')||'node';
+    let key=`${base}-copy`,counter=2;while(existing.has(key))key=`${base}-copy-${counter++}`;existing.add(key);keyById.set(source.id,key);
+    operations.push({type:'COPY',operationId:crypto.randomUUID(),yamlPath:source.yamlPath,
+      sourceFilePath:copied.sourceFilePath,parentYamlPath:insertion.parentYamlPath,key});
   }
-  graphMutationClient.mutate([{ type: 'COPY', yamlPath: copied.yamlPath,
-    sourceFilePath: copied.sourceFilePath, parentYamlPath: insertion.parentYamlPath,
-    key, index: insertion.index }], 'Paste copied behavior node');
+  const descriptor=insertion.parentYamlPath.slice(0,-'/nodes'.length);
+  const prefix=`${graphCanvas.projection.resourceKind}:${graphCanvas.projection.resourceId}#graph:${hex(await crypto.subtle.digest('SHA-256',encoder.encode(descriptor))).slice(0,10)}:node:`;
+  const token=value=>String(value||'').replace(/[^A-Za-z0-9_.:-]/g,'_');
+  for(const edge of copied.edges){const sourceKey=keyById.get(edge.source.nodeId),targetKey=keyById.get(edge.target.nodeId);if(!sourceKey||!targetKey)continue;
+    operations.push({type:'CONNECT',key:`wire-${crypto.randomUUID().replaceAll('-','').slice(0,12)}`,
+      sourcePinId:`${prefix}${token(sourceKey)}:output:${token(edge.source.label)}`,
+      targetPinId:`${prefix}${token(targetKey)}:input:${token(edge.target.label)}`});}
+  const request=operations.length>1?[{type:'COMPOUND',operationId:crypto.randomUUID(),children:operations}]:operations;
+  await graphMutationClient.mutate(request,`Paste ${copied.nodes.length} copied graph node${copied.nodes.length===1?'':'s'}`);
+}
+
+async function duplicateGraphNodes(nodeIds) { if (copyGraphNode(nodeIds)) await pasteGraphNode(); }
+
+function renameGraphNode(nodeId) {
+  const node=(graphCanvas.projection?.nodes||[]).find(value=>value.id===nodeId);
+  if(!node?.yamlPath?.includes('/nodes/')||(node.badges||[]).includes('non-deletable'))return;
+  const newName=prompt('New stable node ID',node.title)?.trim();if(!newName||newName===node.title)return;
+  graphMutationClient.mutate([{type:'RENAME_NODE',operationId:crypto.randomUUID(),yamlPath:node.yamlPath,newName}],`Rename ${node.title}`);
+}
+
+function moveAllPinLinks(pin) {
+  const candidates=(graphCanvas.projection?.nodes||[]).flatMap(node=>(node.pins||[]).map(value=>({node,pin:value})))
+    .filter(entry=>entry.pin.id!==pin.id&&entry.pin.direction===pin.direction&&entry.pin.channel===pin.channel
+      &&entry.pin.valueType===pin.valueType).slice(0,50);
+  if(!candidates.length){yamlStatus.textContent='No compatible destination pin exists in this graph.';return;}
+  const labels=candidates.map((entry,index)=>`${index+1}. ${entry.node.title} · ${entry.pin.label}`);
+  const choice=prompt(`Move all links to which compatible pin?\n${labels.join('\n')}`,'1')?.trim();if(!choice)return;
+  const selected=/^\d+$/.test(choice)?candidates[Number(choice)-1]:candidates.find(entry=>entry.pin.id===choice);
+  if(!selected){yamlStatus.textContent='Choose one of the numbered compatible pins.';return;}
+  graphMutationClient.mutate([{type:'MOVE_LINKS',sourcePinId:pin.id,targetPinId:selected.pin.id}],`Move links to ${selected.pin.label}`);
 }
 
 function handleGraphNodeAction({ type, node }) {
   if (type === 'DUPLICATE_NODE') {
+    if(node.yamlPath.includes('/nodes/')){duplicateGraphNodes([node.id]);return;}
     graphMutationClient.mutate([{ type: 'DUPLICATE', operationId: crypto.randomUUID(), yamlPath: node.yamlPath }], 'Duplicate graph node'); return;
   }
   if (type === 'DELETE_NODE') { deleteGraphNodes([node.id]); return; }
@@ -822,8 +929,7 @@ function handleGraphNodeAction({ type, node }) {
   if (type === 'WRAP_NODE') {
     const nodeKind = prompt('Wrapper type: sequence, selector, priority-selector, parallel, invert, repeat, retry, timeout, cooldown, or checkpoint', 'sequence')?.trim();
     if (!nodeKind) return;
-    const key = prompt('Stable wrapper ID', `wrapper-${crypto.randomUUID().slice(0, 8)}`)?.trim();
-    if (!key) return;
+    const key = automaticNodeId({ label: `${nodeKind}-wrapper` }, graphCanvas.projection?.nodes);
     graphMutationClient.mutate([{ type: 'WRAP', operationId: crypto.randomUUID(), yamlPath: node.yamlPath, nodeKind, key }], 'Wrap graph node'); return;
   }
   if (type === 'UNWRAP_NODE') {
@@ -833,7 +939,10 @@ function handleGraphNodeAction({ type, node }) {
     graphMutationClient.mutate([{ type: 'EDIT_FIELD', yamlPath: '/start', value: node.title }], 'Set dialogue start');
     return;
   }
-  if(type==='ADD_SCRIPT_PARAMETER'){const name=prompt('Parameter name','value')?.trim();if(!name)return;const valueType=prompt('Nominal type (for example integer, text, quest)','string')?.trim();if(!valueType)return;const required=confirm('Require callers to provide this parameter?');const defaultValue=required?null:prompt('Inline default (leave blank for none)','');graphMutationClient.mutate([{type:'ADD_SCRIPT_PARAMETER',parentYamlPath:`${graphCanvas.projection.rootYamlPath}/${node.kind==='script-input'?'inputs':'outputs'}`,key:name,valueType,required,defaultValue:defaultValue||null}],`Add ${name} parameter`);return;}
+  if(type==='ADD_SCRIPT_PARAMETER'){if(graphCanvas.projection?.resourceKind!=='script'||!['script-input','script-output'].includes(node.kind))return;const name=prompt('Parameter name','value')?.trim();if(!name)return;const valueType=prompt('Nominal type (for example integer, text, quest)','string')?.trim();if(!valueType)return;const required=confirm('Require callers to provide this parameter?');const defaultValue=required?null:prompt('Inline default (leave blank for none)','');graphMutationClient.mutate([{type:'ADD_SCRIPT_PARAMETER',parentYamlPath:`${graphCanvas.projection.rootYamlPath}/${node.kind==='script-input'?'inputs':'outputs'}`,key:name,valueType,required,defaultValue:defaultValue||null}],`Add ${name} parameter`);return;}
+  if(['RENAME_VARIABLE','CHANGE_VARIABLE_TYPE','DELETE_VARIABLE'].includes(type)){const variable=node.fields?.find(field=>field.label==='variable')?.value;if(!variable){yamlStatus.textContent='This node does not identify an execution-local variable.';return;}const descriptor=explicitGraphPath(node,graphCanvas.projection);if(type==='RENAME_VARIABLE'){const newName=prompt('New variable name',variable)?.trim();if(newName&&newName!==variable)graphMutationClient.mutate([{type,parentYamlPath:descriptor,parameterName:variable,newName}],`Rename ${variable}`);}else if(type==='CHANGE_VARIABLE_TYPE'){const valueType=prompt('New nominal type','string')?.trim();if(valueType)graphMutationClient.mutate([{type,parentYamlPath:descriptor,parameterName:variable,valueType}],`Change ${variable} type`);}else if(confirm(`Delete variable ${variable}? Getter and setter nodes must be removed first.`))graphMutationClient.mutate([{type,parentYamlPath:descriptor,parameterName:variable}],`Delete ${variable}`);return;}
+  if(type==='REPLACE_NODE'){const nodeKind=prompt('Replacement node type (pins must match uniquely)',node.subtitle?.replace(/^(flow-|script-)/,'')||'message')?.trim();if(nodeKind)graphMutationClient.mutate([{type:'REPLACE_NODE',yamlPath:node.yamlPath,nodeKind}],`Replace ${node.title}`);return;}
+  if(type==='RENAME_NODE'){renameGraphNode(node.id);return;}
   if (type === 'OPEN_REFERENCED_RESOURCE') {
     const resource = deriveResources(state.files).find(item => item.kind === node.subtitle && item.id === node.title);
     if (resource) workspaceShell.openResource(resource);
@@ -862,8 +971,14 @@ function handleGraphNodeAction({ type, node }) {
     const scriptId = prompt('New reusable script ID', `script-${crypto.randomUUID().slice(0, 8)}`)?.trim();
     if (!scriptId) return;
     const resource = workspaceShell.activeResource();
+    const descriptor = explicitGraphPath(node, graphCanvas.projection);
+    const selectedPaths = (graphCanvas.projection?.nodes || []).filter(candidate =>
+      (candidate.id === node.id || graphCanvas.selection.has(candidate.id))
+      && candidate.yamlPath?.startsWith(`${descriptor}/nodes/`)
+      && explicitGraphPath(candidate, graphCanvas.projection) === descriptor)
+      .map(candidate => candidate.yamlPath);
     executeProjectOperation('extract-script', { sourcePath: resource.path,
-      sourceYamlPath: node.yamlPath, scriptId }, 'script', scriptId)
+      sourceYamlPath: node.yamlPath, sourceYamlPaths: selectedPaths, scriptId }, 'script', scriptId)
       .catch(error => { status.textContent = `Reusable-script extraction failed: ${error.message}`; });
     return;
   }
@@ -943,6 +1058,22 @@ function handleScriptParameterAction({ type, port, neighbor }) {
   }
 }
 
+function promotePinToVariable(pin) {
+  if (!pin || pin.channel !== 'DATA') return;
+  const name = prompt('Variable name', String(pin.label || 'value').toLowerCase().replace(/[^a-z0-9_.-]+/g, '-'))?.trim();
+  if (!name) return;
+  if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(name)) {
+    yamlStatus.textContent = 'Variable names use lowercase letters, digits, dot, underscore, and hyphen.'; return;
+  }
+  const incoming = (graphCanvas.projection?.edges || []).filter(edge => edge.targetPinId === pin.id);
+  if (String(pin.direction).toUpperCase() === 'INPUT' && incoming.length
+      && !confirm(`Replace ${incoming.length} existing input link${incoming.length === 1 ? '' : 's'} with a getter for ${name}?`)) return;
+  const operations = incoming.map(edge => ({ type: 'DISCONNECT', edgeId: edge.id }));
+  operations.push({ type: 'PROMOTE_TO_VARIABLE', key: name,
+    [String(pin.direction).toUpperCase() === 'OUTPUT' ? 'sourcePinId' : 'targetPinId']: pin.id });
+  graphMutationClient.mutate(operations, `Promote ${pin.label} to variable ${name}`);
+}
+
 function openRelationshipNode(node) {
   if (!node?.kind?.startsWith('relationship-')) {
     status.textContent = 'The unresolved relationship target has no resource to open.'; return;
@@ -969,10 +1100,10 @@ async function applyStructure(operation, path, targetPath) {
       yamlStatus.textContent = 'Reorder rejected: source and stable neighbor are not in the same projected sequence.'; return;
     }
     const targetNode = graphCanvas.projection?.nodes.find(node => node.yamlPath === targetPath);
-    const neighborPort = targetNode?.pins?.find(pin => pin.direction === 'input') || targetNode?.pins?.[0];
+    const neighborPort = targetNode?.pins?.find(pin => String(pin.direction).toUpperCase() === 'INPUT') || targetNode?.pins?.[0];
     const parentNode = graphCanvas.projection?.nodes.find(node => node.pins?.some(pin =>
-      pin.direction === 'output' && pin.yamlPath === parentPath && pin.label === '+ child'));
-    const parentPort = parentNode?.pins?.find(pin => pin.direction === 'output' && pin.yamlPath === parentPath && pin.label === '+ child');
+      String(pin.direction).toUpperCase() === 'OUTPUT' && pin.yamlPath === parentPath && pin.label === '+ child'));
+    const parentPort = parentNode?.pins?.find(pin => String(pin.direction).toUpperCase() === 'OUTPUT' && pin.yamlPath === parentPath && pin.label === '+ child');
     if (!neighborPort || !parentPort) { yamlStatus.textContent = 'Reorder rejected: stable parent or neighbor ports are no longer projected.'; return; }
     const sourceNode = graphCanvas.projection?.nodes.find(node => node.yamlPath === path);
     const edit = { type: 'REORDER', yamlPath: path, targetYamlPath: targetPath,
@@ -987,7 +1118,6 @@ async function extractSubtree(path){if(!state.connected)return;const behaviorId=
 function refreshDirty() {
   flushSelected();
   refreshWorkspaceResources();
-  exportChanged.disabled = !dirtyFiles().length;
   renderDiff();
 }
 
@@ -1101,7 +1231,16 @@ async function loadSnapshot(verified) {
     revision.push(...encoder.encode(file.path), 0, ...encoder.encode(file.sha256), 0);
   }
   if (hex(await crypto.subtle.digest('SHA-256', new Uint8Array(revision))) !== snapshot.revision) throw new Error('Invalid project revision');
-  let input = `${snapshot.protocolVersion}\n${snapshot.sessionId}\n${snapshot.revision}\n${snapshot.contentFormatVersion}\n${snapshot.createdAt}\n${snapshot.installationPublicKey}`;
+  const folders = [...(snapshot.folders || [])].sort();
+  const manifest = files.find(file => file.path === '.persona/project.yml');
+  const emptyDigest = hex(await crypto.subtle.digest('SHA-256', new Uint8Array()));
+  const manifestDigest = manifest?.sha256 || emptyDigest;
+  if (manifestDigest !== snapshot.manifestDigest) throw new Error('Invalid project manifest digest');
+  const parsedFolders = [...parseProjectFolders(manifest?.content)].sort();
+  if (parsedFolders.length !== folders.length || parsedFolders.some((folder, index) => folder !== folders[index]))
+    throw new Error('Signed folder metadata does not match .persona/project.yml');
+  let input = `${snapshot.protocolVersion}\n${snapshot.sessionId}\n${snapshot.revision}\n${snapshot.contentFormatVersion}\n${snapshot.createdAt}\n${snapshot.installationPublicKey}\n${snapshot.manifestDigest}`;
+  for (const folder of folders) input += `\nfolder:${folder}`;
   for (const file of files) input += `\n${file.path}\n${file.sha256}`;
   const key = await crypto.subtle.importKey('spki', fromB64(snapshot.installationPublicKey), { name: 'Ed25519' }, false, ['verify']);
   if (!await crypto.subtle.verify('Ed25519', key, fromB64(snapshot.signature), encoder.encode(input))) throw new Error('Invalid server signature');
@@ -1112,7 +1251,7 @@ async function loadSnapshot(verified) {
     throw new Error('The server connection changed while refreshing project state');
   state.currentRevision = snapshot.revision;
   state.connected = true;
-  renderProject(files, `Connected securely. Loaded ${files.length} signed content file${files.length === 1 ? '' : 's'}.`, snapshot.revision);
+  renderProject(files, `Connected securely. Loaded ${files.length} signed project file${files.length === 1 ? '' : 's'}.`, snapshot.revision, folders, manifestDigest);
 }
 
 async function loadEditorMetadata(verified, installationPublicKey, installationKey) {
@@ -1160,6 +1299,9 @@ function applyProjectOperation(result, kind, id) {
   const previouslySelected = state.selected;
   const affected = new Set(result.affectedPaths || []);
   state.files = new Map(result.files.map(file => [file.path, file.content]));
+  const manifest = result.files.find(file => file.path === '.persona/project.yml');
+  state.manifestDigest = manifest?.sha256 || state.manifestDigest;
+  state.folders = parseProjectFolders(manifest?.content);
   if (previouslySelected && state.files.has(previouslySelected)) source.value = state.files.get(previouslySelected);
   else state.selected = null;
   for (const path of affected) { state.documentModels.delete(path); state.histories.delete(path); }
@@ -1252,6 +1394,7 @@ function liveKey(kind,value){switch(kind){case'players':return`player:${value.pl
 function applyLiveSnapshot(snapshot){if(!state.liveSubscription||snapshot.subscriptionId!==state.liveSubscription||snapshot.revision<=state.liveRevision)return;if(snapshot.full)for(const values of Object.values(state.liveData))if(values instanceof Map)values.clear();
   for(const removed of snapshot.removedKeys||[])for(const values of Object.values(state.liveData))if(values instanceof Map)values.delete(removed);
   for(const kind of ['players','npcs','behaviors','quests','dialogues','memories'])for(const value of snapshot[kind]||[])state.liveData[kind].set(liveKey(kind,value),value);
+  graphCanvas.addTraceEntries(snapshot.traces||[]);
   if(snapshot.server)state.liveData.server=snapshot.server;state.liveRevision=snapshot.revision;document.querySelector('#status-live').textContent=`Live r${snapshot.revision}`;renderLive();clearTimeout(state.liveStaleTimer);state.liveStaleTimer=setTimeout(()=>{liveStatus.textContent='Live data is stale; waiting for the connected server…';liveDialog.classList.add('stale');},5000);}
 function renderLive(){liveDialog.classList.remove('stale');liveStatus.textContent=`Live revision ${state.liveRevision} · read only · updated ${new Date().toLocaleTimeString()}`;
   renderLiveList('live-players',[...state.liveData.players.values()],value=>`${value.playerId} · ${value.world} · quests ${value.activeQuests.join(', ')||'none'} · runtimes ${value.activeNpcRuntimes}`);
@@ -1265,7 +1408,8 @@ function renderLive(){liveDialog.classList.remove('stale');liveStatus.textConten
   const liveRows=[...state.liveData.behaviors.values()].map(value=>`Behavior ${value.behaviorId} · ${value.status} · ${(value.runningPath||[]).join(' → ')}`)
     .concat([...state.liveData.quests.values()].map(value=>`Quest ${value.questId} · phase ${value.phaseId}`),
       [...state.liveData.dialogues.values()].map(value=>`Dialogue ${value.dialogueId} · ${value.nodeId} · ${value.state}`),
-      [...state.liveData.npcs.values()].map(value=>`NPC ${value.definitionId}/${value.instanceId} · ${value.presentation}/${value.projectionState}`));
+      [...state.liveData.npcs.values()].map(value=>`NPC ${value.definitionId}/${value.instanceId} · ${value.presentation}/${value.projectionState}`),
+      graphCanvas.traceRing.map(value=>`Trace ${new Date(value.at).toLocaleTimeString()} · ${value.node} · ${value.status}`));
   document.querySelector('#live-dock-list').replaceChildren(...liveRows.slice(0,500).map(value=>{const item=document.createElement('li');item.textContent=value;return item;}));
   renderMutationTargets();overlayLiveBehaviorNodes();refreshWorkspaceResources();}
 function renderLiveList(id,values,label){const target=document.querySelector(`#${id}`);target.replaceChildren(...values.map(value=>{const item=document.createElement('li');item.textContent=label(value);return item;}));if(!values.length){const item=document.createElement('li');item.textContent='No matching live state.';target.append(item);}}
@@ -1277,8 +1421,9 @@ document.querySelector('#memory-mutation-form').addEventListener('submit',event=
 function reviewMutation(type,request,details){state.pendingMutation={type,request};mutationDetails.textContent=Object.entries(details).map(([key,value])=>`${key}: ${value}`).join('\n');mutationConfirm.showModal();}
 mutationConfirm.addEventListener('close',async()=>{if(mutationConfirm.returnValue!=='apply'||!state.pendingMutation){state.pendingMutation=null;return;}const pending=state.pendingMutation;state.pendingMutation=null;state.mutationRequests.set(pending.request.requestId,pending);mutationResult.textContent='Mutation sent; waiting for Persona validation…';const sent=await sendSocket(pending.type==='memory'?'MEMORY_MUTATION_REQUEST':'BEHAVIOR_MUTATION_REQUEST',pending.request);if(!sent){state.mutationRequests.delete(pending.request.requestId);mutationResult.textContent='Mutation was not sent because the live socket is disconnected.';}});
 function receiveMutationResult(result){if(!state.mutationRequests.has(result.requestId))return;state.mutationRequests.delete(result.requestId);mutationResult.textContent=`${result.success?'Succeeded':'Rejected'}: ${result.message}`;}
-async function subscribeLive(){if(state.liveSubscription)return;state.liveSubscription=crypto.randomUUID();state.liveRevision=0;const topics=['PLAYERS','NPCS','BEHAVIORS','QUESTS','DIALOGUES','SERVER'];if(state.verified.capabilities.includes('MEMORY_VIEW'))topics.push('MEMORIES');
-  const sent=await sendSocket('LIVE_SUBSCRIBE',{protocolVersion,subscriptionId:state.liveSubscription,topics,filter:{playerIds:[],npcDefinitions:[],npcInstances:[],worlds:[]},refreshMillis:500});if(!sent){state.liveSubscription=null;throw new Error('Live socket is not connected');}liveStatus.textContent='Waiting for Persona to authorize the read-only subscription…';}
+async function subscribeLive(){if(state.liveSubscription)return;state.liveSubscription=crypto.randomUUID();state.liveRevision=0;const topics=['PLAYERS','NPCS','BEHAVIORS','QUESTS','DIALOGUES','TRACES','SERVER'];if(state.verified.capabilities.includes('MEMORY_VIEW'))topics.push('MEMORIES');
+  const sent=await sendSocket('LIVE_SUBSCRIBE',{protocolVersion,subscriptionId:state.liveSubscription,topics,filter:{playerIds:[],npcDefinitions:[],npcInstances:[],worlds:[],tracepoints:[...graphCanvas.tracepoints],watchedPins:[...graphCanvas.watchedPins]},refreshMillis:500});if(!sent){state.liveSubscription=null;throw new Error('Live socket is not connected');}liveStatus.textContent='Waiting for Persona to authorize the selected tracepoints and watches…';}
+async function refreshLiveSubscription(){const previous=state.liveSubscription;if(!previous)return;await sendSocket('LIVE_UNSUBSCRIBE',{protocolVersion,subscriptionId:previous});state.liveSubscription=null;state.liveRevision=0;for(const values of Object.values(state.liveData))if(values instanceof Map)values.clear();graphCanvas.traceRing=[];await subscribeLive();}
 liveOpen.addEventListener('click',()=>{liveDialog.showModal();subscribeLive().catch(error=>{liveStatus.textContent=`Live subscription failed: ${error.message}`;});});
 document.querySelector('#live-close').addEventListener('click',()=>liveDialog.close());
 document.querySelector('#live-dock-subscribe').addEventListener('click',()=>subscribeLive().catch(error=>{document.querySelector('#live-dock-status').textContent=`Live subscription failed: ${error.message}`;}));
@@ -1389,11 +1534,13 @@ function connectSocket() {
     status.textContent = 'Server connected; refreshing authoritative project state…';
     try {
       await loadSnapshot(verified);
+      state.connectionFailure = null;
       scheduleHeartbeat();
       refreshCapabilities();
     } catch (error) {
-      lockWorkspace(`Connected, but authoritative project refresh failed: ${error.message}`);
-      state.socket.close();
+      state.connectionFailure = `Connected, but authoritative project refresh failed: ${error.message}`;
+      lockWorkspace(state.connectionFailure);
+      state.socket.close(4001, snapshotFailureCloseReason(error));
     }
   };
   state.socket.onmessage = async event => {
@@ -1424,7 +1571,7 @@ function connectSocket() {
       }
     } catch { status.textContent = 'Ignored a malformed live relay message.'; }
   };
-  state.socket.onclose = () => {
+  state.socket.onclose = event => {
     clearTimeout(state.heartbeat);
     state.socket = null;
     if (Date.now() >= Date.parse(verified.expiresAt)) {
@@ -1432,7 +1579,10 @@ function connectSocket() {
       return;
     }
     const delay = Math.min(30000, 1000 * (2 ** Math.min(state.reconnectAttempt++, 5)));
-    lockWorkspace('Server connection interrupted; editing is locked while reconnecting…');
+    const closeReason = event.reason
+      ? `Server connection closed (${event.code}): ${event.reason}. Editing is locked while reconnecting…`
+      : 'Server connection interrupted; editing is locked while reconnecting…';
+    lockWorkspace(state.connectionFailure || closeReason);
     document.querySelector('#status-connection').textContent = 'Reconnecting';
     if(state.liveSubscription){liveStatus.textContent='Live data is stale; reconnecting…';liveDialog.classList.add('stale');}
     state.reconnectTimer = setTimeout(connectSocket, delay);
@@ -1444,6 +1594,7 @@ reconnectNow.addEventListener('click', () => {
   if (!state.verified) return;
   if (state.socket && state.socket.readyState < WebSocket.CLOSING) state.socket.close();
   state.socket = null;
+  state.connectionFailure = null;
   status.textContent = 'Retrying the authenticated server connection…';
   connectSocket();
 });
@@ -1571,23 +1722,6 @@ diffToggle.addEventListener('click', () => {
   renderDiff();
 });
 
-async function exportProject(entries, filename) {
-  if (!state.connected || !entries.length) return;
-  status.textContent = 'Preparing deterministic project archive…';
-  try {
-    const response = await fetch(sessionApi('/export'), {
-      method: 'POST', headers: authorizedHeaders({ 'Content-Type': 'application/json' }),
-      body: JSON.stringify({ files: await contentFiles(entries) })
-    });
-    if (!response.ok) throw new Error(await response.text() || `Export HTTP ${response.status}`);
-    const link = document.createElement('a'); link.href = URL.createObjectURL(await response.blob());
-    link.download = filename; link.click(); URL.revokeObjectURL(link.href);
-    status.textContent = `Downloaded ${entries.length} YAML file${entries.length === 1 ? '' : 's'} as ${filename}.`;
-  } catch (error) { status.textContent = `Project export failed: ${error.message}`; }
-}
-exportAll.addEventListener('click', () => exportProject([...state.files], 'persona-project.zip'));
-exportChanged.addEventListener('click', () => exportProject(dirtyFiles(), 'persona-changed-files.zip'));
-
 async function loadReferenceGraph() {
   if (!state.connected) return;
   referencesSummary.textContent = 'Analyzing typed project references…'; referencesList.replaceChildren();
@@ -1714,6 +1848,7 @@ document.querySelector('#semantic-diff-close').addEventListener('click', () => s
 const createDialog = document.querySelector('#create-dialog');
 const createForm = document.querySelector('#create-form');
 const createKind = document.querySelector('#create-kind');
+const createFolderInput = document.querySelector('#create-folder');
 const createId = document.querySelector('#create-id');
 const createPath = document.querySelector('#create-path');
 const createTemplate = document.querySelector('#create-template');
@@ -1727,6 +1862,8 @@ function configureCreateIdentity() {
   createId.pattern = script ? '[a-z0-9][a-z0-9_.-]{0,127}'
     : '[a-z0-9][a-z0-9_.-]{0,62}:[a-z0-9][a-z0-9_.-]{0,62}';
   createId.placeholder = script ? 'welcome' : 'village:guide';
+  const root = createKind.value === 'behavior' ? 'behaviors' : `${createKind.value}s`;
+  if (!createFolderInput.value.startsWith(root)) createFolderInput.value = root;
   previewCreation();
 }
 
@@ -1740,14 +1877,17 @@ async function previewCreation() {
     const value = await response.json();
     if (generation !== createPreviewGeneration) return;
     if (!response.ok) throw new Error(value.message || `HTTP ${response.status}`);
-    createPath.value = value.path; createPreview.value = value.content; createSubmit.disabled = !draftEditAllowed();
+    createPath.value = `${createFolderInput.value}/${value.path.split('/').at(-1)}`;
+    createPreview.value = value.content; createSubmit.disabled = !draftEditAllowed();
   } catch (error) { if (generation === createPreviewGeneration) createError.textContent = error.message; }
 }
 
-function openCreation(kind = 'npc', id = '') {
+function openCreation(kind = 'npc', id = '', folder = null) {
   try { requireDraftEdit(); }
   catch (error) { status.textContent = error.message; return; }
-  createForm.reset(); createKind.value = kind; createId.value = id; configureCreateIdentity();
+  createForm.reset(); createKind.value = kind; createId.value = id;
+  createFolderInput.value = folder || (kind === 'behavior' ? 'behaviors' : `${kind}s`);
+  configureCreateIdentity();
   createDialog.showModal(); createId.focus();
 }
 
@@ -1799,6 +1939,67 @@ async function executeProjectOperation(endpoint, payload, openKind, openId) {
   return result;
 }
 
+function kindForFolder(folder) {
+  return ({ npcs: 'npc', dialogues: 'dialogue', quests: 'quest', behaviors: 'behavior', scripts: 'script' })[folder.split('/')[0]] || 'npc';
+}
+
+async function createProjectFolder(parent) {
+  const segment = prompt(`New folder beneath ${parent}:`, 'new-folder');
+  if (!segment) return;
+  try {
+    const folder = `${parent}/${segment}`;
+    await executeProjectOperation('folders/create', { folder, expectedManifestDigest: state.manifestDigest });
+    workspaceShell.selectFolder(folder, false);
+  } catch (error) { status.textContent = `Folder creation failed: ${error.message}`; }
+}
+
+async function moveProjectFolder(folder, destination = null) {
+  const basename = folder.split('/').at(-1);
+  const replacementFolder = destination ? `${destination}/${basename}`
+    : prompt(`Move or rename ${folder} to:`, folder);
+  if (!replacementFolder || replacementFolder === folder) return;
+  try {
+    await executeProjectOperation('folders/move', { folder, replacementFolder,
+      expectedManifestDigest: state.manifestDigest });
+    workspaceShell.selectFolder(replacementFolder, false);
+  } catch (error) { status.textContent = `Folder move failed: ${error.message}`; }
+}
+
+async function deleteProjectFolder(folder) {
+  try {
+    requireDraftEdit();
+    const files = await contentFiles(), expectedRevision = await projectRevision(files);
+    const body = { files, expectedRevision, expectedManifestDigest: state.manifestDigest, folder };
+    const previewResponse = await fetch(sessionApi('/projects/folders/delete-preview'), {
+      method: 'POST', headers: authorizedHeaders({ 'Content-Type': 'application/json' }), body: JSON.stringify(body)
+    });
+    const preview = await previewResponse.json();
+    if (!previewResponse.ok) throw new Error(preview.message || `HTTP ${previewResponse.status}`);
+    if (preview.blockingReferences?.length) throw new Error(`Blocked by ${preview.blockingReferences.length} external inbound reference(s).`);
+    const resources = preview.resources.length ? `\n\n${preview.resources.join('\n')}` : '\n\nThe folder is empty.';
+    if (!confirm(`Delete ${folder} and ${preview.resources.length} contained resource file(s)?${resources}`)) return;
+    await executeProjectOperation('folders/delete', { folder, expectedManifestDigest: preview.manifestDigest });
+  } catch (error) { status.textContent = `Folder deletion failed: ${error.message}`; }
+}
+
+async function moveResourceToFolder(resource, folder) {
+  const replacementPath = `${folder}/${resource.path.split('/').at(-1)}`;
+  if (replacementPath === resource.path) return;
+  try { await executeProjectOperation('move', { kind: resource.kind, id: resource.id, replacementPath }, resource.kind, resource.id); }
+  catch (error) { status.textContent = `Resource move failed: ${error.message}`; }
+}
+
+async function copyResourceToFolder(resource, folder) {
+  const replacementId = prompt(`Copy ${resource.id} into ${folder} with new ID:`, `${resource.id}-copy`);
+  if (!replacementId) return;
+  try {
+    const safe = await requestSafePath(resource.kind, replacementId);
+    const replacementPath = `${folder}/${safe.split('/').at(-1)}`;
+    await executeProjectOperation('duplicate', { kind: resource.kind, sourceId: resource.id,
+      replacementId, replacementPath }, resource.kind, replacementId);
+  } catch (error) { status.textContent = `Resource copy failed: ${error.message}`; }
+}
+
 async function requestSafePath(kind, id) {
   const query = new URLSearchParams({ kind, id });
   const response = await fetch(`${sessionApi('/projects/safe-path')}?${query}`, { headers: authorizedHeaders() });
@@ -1836,8 +2037,9 @@ renameResourceButton.addEventListener('click', async () => {
     if (!previewResponse.ok || !preview.safe) throw new Error(preview.conflicts?.join(' ') || preview.message || `HTTP ${previewResponse.status}`);
     const summary = preview.occurrences.map(item => `${item.role}: ${item.path}:${item.line} ${item.yamlPath}`).join('\n');
     if (!confirm(`Apply this atomic rename?\n\n${summary}`)) return;
-    const renameFile = resource.kind !== 'script' && confirm('Also rename the file to the server-suggested safe path?');
-    const replacementPath = renameFile ? await requestSafePath(resource.kind, replacementId) : resource.path;
+    const renameFile = confirm('Also rename the file while keeping it in this folder?');
+    const safePath = renameFile ? await requestSafePath(resource.kind, replacementId) : resource.path;
+    const replacementPath = renameFile ? `${resource.folder}/${safePath.split('/').at(-1)}` : resource.path;
     await executeProjectOperation('rename', { kind: resource.kind, currentId: resource.id, replacementId, renameFile, replacementPath }, resource.kind, replacementId);
   } catch (error) { status.textContent = `Rename failed: ${error.message}`; }
 });
@@ -1845,9 +2047,11 @@ renameResourceButton.addEventListener('click', async () => {
 moveResourceButton.addEventListener('click', async () => {
   const resource = workspaceShell.activeResource(); if (!resource || moveResourceButton.disabled) return;
   try {
-    const replacementPath = await requestSafePath(resource.kind, resource.id);
+    const suggested = `${workspaceShell.selectedFolder}/${resource.path.split('/').at(-1)}`;
+    const replacementPath = prompt('Validated destination path beneath the same kind root:', suggested);
+    if (!replacementPath) return;
     if (replacementPath === resource.path) {
-      status.textContent = `${resource.id} already uses its canonical server-approved path.`; return;
+      status.textContent = `${resource.id} already uses that path.`; return;
     }
     if (!confirm(`Move ${resource.id} from ${resource.path} to ${replacementPath}? The file bytes will not change.`)) return;
     await executeProjectOperation('move', { kind: resource.kind, id: resource.id, replacementPath }, resource.kind, resource.id);
@@ -1892,7 +2096,7 @@ async function pollPublish(publishId) {
 
 publishButton.addEventListener('click', async () => {
   if (publishButton.disabled || !state.validationResult?.valid) return;
-  publishButton.disabled = true; status.textContent = 'Creating a one-time in-game publication confirmation…';
+  publishButton.disabled = true; status.textContent = 'Sending the validated content to Persona…';
   try {
     const response = await fetch(`/api/v1/editor/sessions/${sessionId}/publishes`, {
       method: 'POST', headers: { Authorization: `Bearer ${state.verified.browserLeaseToken}`, 'Content-Type': 'application/json' },
@@ -1900,10 +2104,10 @@ publishButton.addEventListener('click', async () => {
         proposedRevision: state.validationResult.proposedRevision })
     });
     if (!response.ok) throw new Error(await response.text() || `HTTP ${response.status}`);
-    const publish = await response.json(), shortSession = sessionId.substring(0, 8);
+    const publish = await response.json();
     validationPanel.hidden = false;
-    validationSummary.textContent = `Publication ${publish.publishId.substring(0, 8)} awaits in-game confirmation. Run /persona editor apply ${shortSession} ${publish.confirmationCode} before ${new Date(publish.expiresAt).toLocaleTimeString()}.`;
-    status.textContent = 'Candidate remains unapplied until the one-time code is confirmed in Minecraft.';
+    validationSummary.textContent = `Publishing ${publish.publishId.substring(0, 8)} through the trusted Persona session…`;
+    status.textContent = 'Persona is revalidating, backing up, and applying the candidate.';
     pollPublish(publish.publishId);
   } catch (error) { status.textContent = `Publication request failed: ${error.message}`; updatePublishButton(); }
 });
@@ -1967,6 +2171,42 @@ document.querySelector('#rail-relationship-map').addEventListener('click', event
 for (const view of ['library', 'bookmarks', 'recents']) document.querySelector(`#rail-${view}`)
   .addEventListener('click', () => { panelLayout.show('browser'); workspaceShell.showView(view); });
 let paletteContext = { type: 'commands' };
+const PALETTE_PREFERENCE_KEY = 'persona:graph-palette:v1';
+let palettePreferences = loadPalettePreferences();
+paletteContextSensitive.checked = palettePreferences.contextSensitive;
+
+function loadPalettePreferences() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(PALETTE_PREFERENCE_KEY) || '{}');
+    return { contextSensitive: stored.contextSensitive !== false,
+      favorites: Array.isArray(stored.favorites) ? stored.favorites.slice(0, 100) : [],
+      recent: Array.isArray(stored.recent) ? stored.recent.slice(0, 30) : [] };
+  } catch { return { contextSensitive: true, favorites: [], recent: [] }; }
+}
+
+function savePalettePreferences() {
+  try { localStorage.setItem(PALETTE_PREFERENCE_KEY, JSON.stringify(palettePreferences)); }
+  catch { /* The palette remains usable when private storage is unavailable. */ }
+}
+
+function paletteNodeId(definition) {
+  return `${graphCanvas.projection?.resourceKind || 'graph'}:${definition.nodeKind}:${definition.extensionType || definition.valueType || ''}`;
+}
+
+function paletteNodeCategory(definition) {
+  if (definition.extensionType || definition.nodeKind.startsWith('extension-')) return 'Extensions';
+  if (['sequence', 'branch', 'choice', 'switch', 'random', 'gate', 'do-once', 'do-n', 'for', 'for-each', 'while',
+    'selector', 'priority-selector', 'parallel'].includes(definition.nodeKind)) return 'Flow Control';
+  if (definition.nodeKind.startsWith('get-') || definition.nodeKind.includes('-to-') || definition.nodeKind === 'to-string') return 'Values';
+  if (['dialogue-entry', 'quest-phase', 'quest-objective', 'npc-anchor'].includes(definition.nodeKind)) return 'Structure';
+  if (definition.nodeKind.includes('behavior') || definition.nodeKind.includes('dialogue') || definition.nodeKind.includes('quest')) return 'References';
+  return 'Actions';
+}
+
+function paletteSearchText(definition) {
+  return [definition.label, definition.nodeKind, paletteNodeCategory(definition), definition.destination,
+    ...(definition.keywords || [])].filter(Boolean).join(' ').toLowerCase();
+}
 
 function graphNodeDefinitions() {
   return nodeDefinitions(graphCanvas.projection?.resourceKind, state.editorSchemas.values());
@@ -1974,6 +2214,22 @@ function graphNodeDefinitions() {
 
 function graphNodeByPin(pin) {
   return (graphCanvas.projection?.nodes || []).find(node => node.id === pin?.nodeId) || null;
+}
+
+function explicitGraphPath(node, projection) {
+  if (!node) return projection?.resourceKind === 'script' ? projection.rootYamlPath : null;
+  if (node.kind === 'event') return node.yamlPath;
+  if (node.kind === 'script-input' || node.kind === 'script-output') return projection.rootYamlPath;
+  const marker = node.yamlPath?.lastIndexOf('/nodes/');
+  if (marker >= 0) return node.yamlPath.slice(0, marker);
+  if (node.kind === 'dialogue-entry') return `${node.yamlPath}/graph`;
+  if (node.kind === 'quest-phase' || node.kind === 'quest-objective') {
+    return (projection.nodes || []).find(candidate => candidate.kind === 'event'
+      && candidate.yamlPath?.startsWith(`${node.yamlPath}/on-start`))?.yamlPath || `${node.yamlPath}/on-start`;
+  }
+  if (node.kind === 'quest') return `${projection.rootYamlPath}/on-start`.replace(/^\/\//, '/');
+  if (node.kind === 'npc-configuration') return `${projection.rootYamlPath}/on-click`.replace(/^\/\//, '/');
+  return null;
 }
 
 function graphInsertion(definition, sourcePin) {
@@ -1989,18 +2245,11 @@ function graphInsertion(definition, sourcePin) {
       const segment = targetPath.substring(parentYamlPath.length + 1).split('/')[0];
       if (/^\d+$/.test(segment)) index = Number(segment);
     }
-  } else if (definition.destination === 'script' && ['dialogue', 'quest', 'npc', 'script'].includes(kind)) {
-    const owner = sourceNode || selected;
-    if (kind === 'script') parentYamlPath = `${projection.rootYamlPath}/nodes`;
-    else if (kind === 'quest' && owner?.kind === 'quest-phase') parentYamlPath = `${owner.yamlPath}/on-start`;
-    else if (kind === 'quest' && owner?.kind === 'quest') parentYamlPath = `${owner.yamlPath}/on-start`.replace(/^\/\//, '/');
-    else if (kind === 'npc' && owner?.kind === 'npc') parentYamlPath = `${owner.yamlPath}/on-interact`.replace(/^\/\//, '/');
-    else if (owner?.kind === 'dialogue-entry') parentYamlPath = `${owner.yamlPath}/script`;
-    else if ((owner?.kind?.startsWith('script-') || owner?.kind === 'extension-command') && owner.yamlPath?.includes('/')) {
-      parentYamlPath = owner.yamlPath.slice(0, owner.yamlPath.lastIndexOf('/'));
-      const segment = owner.yamlPath.slice(owner.yamlPath.lastIndexOf('/') + 1);
-      if (/^\d+$/.test(segment)) index = Number(segment) + 1;
-    }
+  } else if (['graph', 'script'].includes(definition.destination) && ['dialogue', 'quest', 'npc', 'script'].includes(kind)) {
+    let owner = sourceNode || selected;
+    if (!owner && kind !== 'script') owner = projection.nodes.find(node => node.kind === 'event');
+    const descriptor = explicitGraphPath(owner, projection);
+    if (descriptor != null) parentYamlPath = `${descriptor}/nodes`.replace(/^\/\//, '/');
   } else if (kind === 'dialogue') {
     if (definition.nodeKind === 'dialogue-entry') parentYamlPath = `${projection.rootYamlPath}/nodes`.replace(/^\/\//, '/');
     else {
@@ -2008,7 +2257,7 @@ function graphInsertion(definition, sourcePin) {
       if (owner && owner.kind !== 'dialogue-entry') owner = projection.nodes.find(node =>
         node.kind === 'dialogue-entry' && owner.yamlPath.startsWith(node.yamlPath + '/'));
       if (!owner) return null;
-      parentYamlPath = `${owner.yamlPath}/script`;
+      parentYamlPath = `${owner.yamlPath}/graph/nodes`;
     }
   } else if (kind === 'quest') {
     if (definition.nodeKind === 'quest-phase') parentYamlPath = `${projection.rootYamlPath}/phases`.replace(/^\/\//, '/');
@@ -2024,64 +2273,125 @@ function graphInsertion(definition, sourcePin) {
 function availableGraphNodes() {
   const sourcePin = paletteContext.sourcePin;
   let definitions = graphNodeDefinitions();
-  if (paletteContext.edge && graphCanvas.projection?.resourceKind === 'behavior')
+  if (palettePreferences.contextSensitive && paletteContext.edge && graphCanvas.projection?.resourceKind === 'behavior')
     definitions = definitions.filter(definition => ['sequence', 'selector', 'priority-selector', 'parallel',
       'checkpoint', 'cooldown'].includes(definition.nodeKind));
   return compatibleDefinitions(definitions, sourcePin,
-    definition => Boolean(graphInsertion(definition, sourcePin)));
+    definition => Boolean(graphInsertion(definition, sourcePin)), palettePreferences.contextSensitive);
+}
+
+function occupiedInsertionKeys(parentYamlPath) {
+  const parent = findModelNode(state.documentModels.get(state.selected)?.root, parentYamlPath);
+  const parsedKeys = parent?.kind === 'mapping' ? (parent.children || []).map(child => child.key).filter(Boolean) : [];
+  return [...new Set([...parsedKeys, ...yamlMappingKeys(state.files.get(state.selected)), ...yamlMappingKeys(source.value)])];
+}
+
+function placeCreatedGraphNode(result, key, position) {
+  if (!result || !Number.isFinite(position?.x) || !Number.isFinite(position?.y)) return;
+  const createdIds = Object.values(result.identityRemap || {});
+  const node = (graphCanvas.projection?.nodes || []).find(candidate => createdIds.includes(candidate.id))
+    || (graphCanvas.projection?.nodes || []).find(candidate => candidate.title === key);
+  if (!node) return;
+  graphCanvas.positions[node.id] = { x: position.x, y: position.y };
+  graphCanvas.select(node.id, false);
+  graphCanvas.schedule();
+  graphCanvas.changed();
 }
 
 async function insertGraphNode(definition) {
   const sourcePin = paletteContext.sourcePin, insertion = graphInsertion(definition, sourcePin);
+  const matchingInput = matchingDefinitionInput(definition, sourcePin);
+  const connectSource = Boolean(matchingInput);
+  const position = paletteContext.position;
   if (!insertion) { yamlStatus.textContent = 'No compatible authoritative YAML container exists at this destination.'; return; }
   let key = null;
-  if (definition.requiresKey || ['behavior', 'script'].includes(graphCanvas.projection.resourceKind)) {
-    key = prompt('Stable node ID', `node-${crypto.randomUUID().slice(0, 8)}`)?.trim();
-    if (!key) return;
-    if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(key)) {
-      yamlStatus.textContent = 'Node IDs use lowercase letters, digits, dot, underscore, and hyphen.'; return;
-    }
+  if (definition.requiresKey || definition.destination === 'graph' || ['behavior', 'script'].includes(graphCanvas.projection.resourceKind)) {
+    const occupied = occupiedInsertionKeys(insertion.parentYamlPath).map(title => ({ title }));
+    key = automaticNodeId(definition, [...(graphCanvas.projection?.nodes || []), ...occupied]);
   }
   if (paletteContext.edge && graphCanvas.projection.resourceKind === 'behavior') {
     const edge = paletteContext.edge;
     const wrapper = { type: 'WRAP', operationId: crypto.randomUUID(), yamlPath: edge.targetYamlPath,
       nodeKind: definition.nodeKind, key };
-    await graphMutationClient.mutate([{ type: 'INSERT_ON_WIRE', edgeId: edge.id,
+    const result = await graphMutationClient.mutate([{ type: 'INSERT_ON_WIRE', edgeId: edge.id,
       sourcePinId: edge.sourcePinId, targetPinId: edge.targetPinId, children: [wrapper] }],
     `Insert ${definition.label} on wire`);
+    placeCreatedGraphNode(result, key, position);
     return;
   }
   const operations = [{ type: 'INSERT', operationId: crypto.randomUUID(), parentYamlPath: insertion.parentYamlPath,
     nodeKind: definition.nodeKind, key, value: definition.extensionType || definition.valueType || null, index: insertion.index }];
-  if (sourcePin && ['dialogue-entry', 'quest-phase'].includes(definition.nodeKind)) {
+  if (connectSource && ['dialogue-entry', 'quest-phase'].includes(definition.nodeKind)) {
     const targetNodeId = `${graphCanvas.projection.resourceKind}:${graphCanvas.projection.resourceId}#${key}`;
     operations.push({ type: 'CONNECT', sourcePinId: sourcePin.id, targetPinId: `${targetNodeId}:in` });
   }
-  if (sourcePin && graphCanvas.projection.resourceKind === 'script' && definition.targetPinLabel) {
-    const targetNodeId = `script:${graphCanvas.projection.resourceId}#node:${key}`;
+  if (connectSource && definition.destination === 'graph' && matchingInput?.label) {
+    const descriptor = insertion.parentYamlPath.slice(0, -'/nodes'.length);
+    const graphHash = hex(await crypto.subtle.digest('SHA-256', encoder.encode(descriptor))).slice(0, 10);
+    const pinToken = value => String(value || '').replace(/[^A-Za-z0-9_.:-]/g, '_');
+    const targetNodeId = `${graphCanvas.projection.resourceKind}:${graphCanvas.projection.resourceId}#graph:${graphHash}:node:${pinToken(key)}`;
     operations.push({ type: 'CONNECT', key: `wire-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}`,
-      sourcePinId: sourcePin.id, targetPinId: `${targetNodeId}:input:${definition.targetPinLabel}` });
+      sourcePinId: sourcePin.id, targetPinId: `${targetNodeId}:input:${pinToken(matchingInput.label)}` });
   }
   const requestOperations = operations.length > 1
     ? [{ type: 'COMPOUND', operationId: crypto.randomUUID(), children: operations }] : operations;
-  await graphMutationClient.mutate(requestOperations, sourcePin ? 'Insert and connect node' : `Insert ${definition.label}`);
+  const result = await graphMutationClient.mutate(requestOperations, connectSource ? 'Insert and connect node' : `Insert ${definition.label}`);
+  placeCreatedGraphNode(result, key, position);
+  const nodeId = paletteNodeId(definition);
+  palettePreferences.recent = [nodeId, ...palettePreferences.recent.filter(value => value !== nodeId)].slice(0, 30);
+  savePalettePreferences();
 }
 
 function renderCommands() {
   const query = paletteSearch.value.trim().toLowerCase();
-  const entries = paletteContext.type === 'graph'
-    ? availableGraphNodes().map(definition => [definition.label, () => insertGraphNode(definition), true, ''])
-    : commandDispatcher.entries().map(command => [command.label, () => commandDispatcher.execute(command.id), command.available, command.reason]);
-  const matches = entries.filter(([name]) => name.toLowerCase().includes(query));
-  paletteResults.replaceChildren(...matches.map(([name, run, available, reason], index) => {
-    const item = document.createElement('li'), button = document.createElement('button');
-    button.type = 'button'; button.textContent = available ? name : `${name} — ${reason}`;
-    button.disabled = !available; button.title = reason; button.dataset.index = String(index);
-    button.addEventListener('click', () => { palette.close(); run(); }); item.append(button); return item;
+  const graphEntries = paletteContext.type === 'graph' ? availableGraphNodes().map(definition => {
+    const insertable = Boolean(graphInsertion(definition, paletteContext.sourcePin));
+    return { id: paletteNodeId(definition), name: definition.label, search: paletteSearchText(definition),
+      category: paletteNodeCategory(definition), run: () => insertGraphNode(definition), available: insertable,
+      reason: insertable ? '' : 'No compatible YAML destination is selected', definition };
+  }) : [];
+  const entries = paletteContext.type === 'graph' ? graphEntries : commandDispatcher.entries().map(command => ({
+    id: command.id, name: command.label, search: `${command.label} ${command.id}`.toLowerCase(), category: 'Commands',
+    run: () => commandDispatcher.execute(command.id), available: command.available, reason: command.reason
   }));
+  const matches = entries.filter(entry => entry.search.includes(query));
+  const recentIndex = id => { const index = palettePreferences.recent.indexOf(id); return index < 0 ? Number.MAX_SAFE_INTEGER : index; };
+  const favorite = entry => palettePreferences.favorites.includes(entry.id);
+  matches.sort((left, right) => Number(favorite(right)) - Number(favorite(left))
+    || recentIndex(left.id) - recentIndex(right.id) || left.category.localeCompare(right.category) || left.name.localeCompare(right.name));
+  const groups = new Map();
+  for (const entry of matches) {
+    const group = favorite(entry) ? 'Favorites' : recentIndex(entry.id) < Number.MAX_SAFE_INTEGER ? 'Recently Used' : entry.category;
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(entry);
+  }
+  const children = [];
+  for (const [group, values] of groups) {
+    const heading = document.createElement('li'); heading.className = 'palette-heading'; heading.textContent = group; children.push(heading);
+    for (const entry of values) {
+      const item = document.createElement('li'), button = document.createElement('button');
+      button.type = 'button'; button.className = 'palette-run';
+      button.textContent = entry.available ? entry.name : `${entry.name} — ${entry.reason}`;
+      button.disabled = !entry.available; button.title = entry.reason;
+      button.addEventListener('click', () => { palette.close(); entry.run(); }); item.append(button);
+      if (entry.definition) {
+        const star = document.createElement('button'); star.type = 'button'; star.className = 'palette-favorite';
+        star.textContent = favorite(entry) ? '★' : '☆'; star.setAttribute('aria-label', `${favorite(entry) ? 'Remove' : 'Add'} ${entry.name} ${favorite(entry) ? 'from' : 'to'} favorites`);
+        star.addEventListener('click', () => {
+          palettePreferences.favorites = favorite(entry) ? palettePreferences.favorites.filter(value => value !== entry.id)
+            : [entry.id, ...palettePreferences.favorites].slice(0, 100);
+          savePalettePreferences(); renderCommands();
+        }); item.append(star);
+      }
+      children.push(item);
+    }
+  }
+  paletteResults.replaceChildren(...children);
   if (!matches.length) {
     const empty = document.createElement('li'); empty.className = 'empty-state';
-    empty.textContent = paletteContext.type === 'graph' ? 'No node type is compatible at this destination.' : 'No matching command.';
+    empty.textContent = paletteContext.type === 'graph'
+      ? palettePreferences.contextSensitive ? 'No node type is compatible at this destination.' : 'No matching node type.'
+      : 'No matching command.';
     paletteResults.append(empty);
   }
 }
@@ -2092,13 +2402,28 @@ function openPalette() {
 }
 function openGraphPalette(context = {}) {
   if (!state.connected || !graphCanvas.projection?.editable) return;
-  paletteContext = { type: 'graph', sourcePin: context.sourcePin || null, edge: context.edge || null };
+  if (graphMutationClient.inFlight) {
+    yamlStatus.textContent = 'Wait for the current graph edit to finish before choosing another node.'; return;
+  }
+  const bounds = graphCanvas.canvas.getBoundingClientRect();
+  const clientX = Number.isFinite(context.clientX) ? context.clientX : bounds.left + bounds.width / 2;
+  const clientY = Number.isFinite(context.clientY) ? context.clientY : bounds.top + bounds.height / 2;
+  paletteContext = { type: 'graph', sourcePin: context.sourcePin || null, edge: context.edge || null,
+    position: Number.isFinite(context.graphPosition?.x) && Number.isFinite(context.graphPosition?.y)
+      ? { ...context.graphPosition } : graphCanvas.screenToGraph(clientX, clientY) };
   palette.querySelector('label').textContent = context.sourcePin ? `Add from ${context.sourcePin.label} output` : 'Add graph node';
-  paletteSearch.placeholder = 'Search compatible node types…';
+  paletteSearch.placeholder = palettePreferences.contextSensitive
+    ? 'Search compatible node types…' : 'Search all node types…';
   palette.showModal(); paletteSearch.value = ''; renderCommands(); paletteSearch.focus();
 }
 paletteOpen.addEventListener('click', openPalette);
 paletteSearch.addEventListener('input', renderCommands);
+paletteContextSensitive.addEventListener('change', () => {
+  palettePreferences.contextSensitive = paletteContextSensitive.checked;
+  if (paletteContext.type === 'graph') paletteSearch.placeholder = palettePreferences.contextSensitive
+    ? 'Search compatible node types…' : 'Search all node types…';
+  savePalettePreferences(); renderCommands();
+});
 palette.addEventListener('keydown', event => {
   const buttons = [...paletteResults.querySelectorAll('button:not(:disabled)')], current = buttons.indexOf(document.activeElement);
   if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {

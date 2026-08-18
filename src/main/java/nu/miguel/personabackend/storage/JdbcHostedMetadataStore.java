@@ -129,14 +129,16 @@ public final class JdbcHostedMetadataStore implements HostedMetadataStore {
                         .param("path", file.path()).param("sha256", file.sha256()).param("content", file.content()).update();
             if(value.sourceSessionId()!=null)jdbc.sql("""
                     INSERT INTO content_snapshot_envelope(session_id, installation_id, revision, created_at,
-                      signed_created_at, signature)
-                    VALUES (:session, :installation, :revision, :created, :signedCreated, :signature)
+                      signed_created_at, content_format_version, signature)
+                    VALUES (:session, :installation, :revision, :created, :signedCreated, :format, :signature)
                     ON CONFLICT (session_id) DO UPDATE SET installation_id=EXCLUDED.installation_id,
                       revision=EXCLUDED.revision, created_at=EXCLUDED.created_at,
-                      signed_created_at=EXCLUDED.signed_created_at, signature=EXCLUDED.signature
+                      signed_created_at=EXCLUDED.signed_created_at,
+                      content_format_version=EXCLUDED.content_format_version, signature=EXCLUDED.signature
                     """).param("session",value.sourceSessionId()).param("installation",value.installationId())
                     .param("revision",value.revision()).param("created",databaseTime(value.createdAt()))
-                    .param("signedCreated",value.createdAt().toString()).param("signature",value.signature()).update();
+                    .param("signedCreated",value.createdAt().toString()).param("format",value.contentFormatVersion())
+                    .param("signature",value.signature()).update();
         });
     }
     @Override public Optional<ContentRevision> revision(UUID id, String revision) {
@@ -159,7 +161,7 @@ public final class JdbcHostedMetadataStore implements HostedMetadataStore {
     }
     @Override public Optional<ContentRevision> latestRevisionForSession(UUID sessionId) {
         return jdbc.sql("""
-                SELECT r.installation_id, r.revision, r.content_format_version, e.created_at, e.signed_created_at,
+                SELECT r.installation_id, r.revision, e.content_format_version, e.created_at, e.signed_created_at,
                   e.session_id AS source_session_id, encode(i.public_key, 'base64') AS public_key, e.signature
                 FROM content_snapshot_envelope e
                 JOIN content_revision r ON r.installation_id=e.installation_id AND r.revision=e.revision
@@ -216,12 +218,11 @@ public final class JdbcHostedMetadataStore implements HostedMetadataStore {
     }
     @Override public Optional<PublishRequest> publishRequest(UUID id) {
         return jdbc.sql("SELECT * FROM publish_request WHERE id = :id").param("id", id)
-                .query((rs, row) -> new PublishRequest(rs.getObject("id", UUID.class),
-                        rs.getObject("installation_id", UUID.class), rs.getObject("session_id", UUID.class),
-                        rs.getObject("draft_id", UUID.class), rs.getString("base_revision"),
-                        rs.getString("proposed_revision"), PublishRequest.Status.valueOf(rs.getString("status")),
-                        instant(rs, "requested_at"), instant(rs, "completed_at"), rs.getString("validation_result"),
-                        rs.getString("semantic_diff"), rs.getString("rollback_revision"))).optional();
+                .query(this::publishRow).optional();
+    }
+    @Override public Optional<PublishRequest> firstPublishRequest(UUID sessionId, PublishRequest.Status status) {
+        return jdbc.sql("SELECT * FROM publish_request WHERE session_id = :session AND status = :status ORDER BY requested_at ASC LIMIT 1")
+                .param("session", sessionId).param("status", status.name()).query(this::publishRow).optional();
     }
     @Override public void saveSubscription(LiveSubscription value) {
         jdbc.sql("""
@@ -292,6 +293,14 @@ public final class JdbcHostedMetadataStore implements HostedMetadataStore {
         return new HostedDraft(rs.getObject("id", UUID.class), rs.getObject("installation_id", UUID.class),
                 rs.getObject("session_id", UUID.class), rs.getString("author_id"), rs.getString("author_name"),
                 rs.getString("base_revision"), instant(rs, "created_at"), instant(rs, "updated_at"), List.of());
+    }
+    private PublishRequest publishRow(ResultSet rs, int row) throws SQLException {
+        return new PublishRequest(rs.getObject("id", UUID.class), rs.getObject("installation_id", UUID.class),
+                rs.getObject("session_id", UUID.class), rs.getObject("draft_id", UUID.class),
+                rs.getString("base_revision"), rs.getString("proposed_revision"),
+                PublishRequest.Status.valueOf(rs.getString("status")), instant(rs, "requested_at"),
+                instant(rs, "completed_at"), rs.getString("validation_result"),
+                rs.getString("semantic_diff"), rs.getString("rollback_revision"));
     }
     private List<ContentFile> revisionFiles(UUID id, String revision) {
         return jdbc.sql("SELECT path, sha256, content FROM content_revision_file WHERE installation_id = :id AND revision = :revision ORDER BY path")

@@ -3,6 +3,7 @@ package nu.miguel.personabackend.snapshot;
 import nu.miguel.persona.editor.protocol.*;
 import nu.miguel.personabackend.session.EditorProperties;
 import nu.miguel.personabackend.session.SessionService;
+import nu.miguel.personabackend.project.ProjectPathRules;
 import org.junit.jupiter.api.Test;
 import org.springframework.web.server.ResponseStatusException;
 
@@ -45,7 +46,8 @@ class SnapshotServiceTest {
         ContentFile file = valid.files().getFirst();
         ContentSnapshot tampered = new ContentSnapshot(valid.protocolVersion(), valid.sessionId(), valid.revision(),
                 valid.contentFormatVersion(), valid.createdAt(), valid.installationPublicKey(),
-                List.of(new ContentFile(file.path(), file.sha256(), "changed")), valid.signature());
+                List.of(new ContentFile(file.path(), file.sha256(), "changed")), valid.folders(),
+                valid.manifestDigest(), valid.signature());
         assertThrows(ResponseStatusException.class,
                 () -> snapshots.store(created.sessionId(), created.pluginLeaseToken(), tampered));
     }
@@ -65,12 +67,12 @@ class SnapshotServiceTest {
         MessageDigest aggregate = MessageDigest.getInstance("SHA-256");
         aggregate.update(path.getBytes(StandardCharsets.UTF_8)); aggregate.update((byte) 0);
         aggregate.update(fileHash.getBytes(StandardCharsets.US_ASCII)); aggregate.update((byte) 0);
-        ContentSnapshot unsigned = new ContentSnapshot(Protocol.VERSION, sessionId, hex(aggregate.digest()), 1,
+        ContentSnapshot unsigned = new ContentSnapshot(Protocol.VERSION, sessionId, hex(aggregate.digest()), 2,
                 Instant.now(), Base64.getEncoder().encodeToString(keys.getPublic().getEncoded()),
-                List.of(new ContentFile(path, fileHash, content)), "");
+                List.of(new ContentFile(path, fileHash, content)), Set.of(), ProjectPathRules.sha256(""), "");
         return new ContentSnapshot(unsigned.protocolVersion(), unsigned.sessionId(), unsigned.revision(),
                 unsigned.contentFormatVersion(), unsigned.createdAt(), unsigned.installationPublicKey(), unsigned.files(),
-                sign(keys.getPrivate(), unsigned.signingInput()));
+                unsigned.folders(), unsigned.manifestDigest(), sign(keys.getPrivate(), unsigned.signingInput()));
     }
 
     private static String sign(PrivateKey key, String input) throws Exception {

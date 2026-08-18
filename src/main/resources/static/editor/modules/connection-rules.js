@@ -1,7 +1,7 @@
 /** Pure client-side advisory checks. The server repeats every rule authoritatively. */
 export function connectionCompatibility(source, target, { incoming = [], wouldCycle = false, capabilities = [], resourceScope = 'CURRENT_RESOURCE' } = {}) {
   if (!source || !target) return { valid: false, reason: 'Choose two existing pins.' };
-  if (source.direction !== 'output' || target.direction !== 'input')
+  if (String(source.direction).toUpperCase() !== 'OUTPUT' || String(target.direction).toUpperCase() !== 'INPUT')
     return { valid: false, reason: 'Connections run from an output pin to an input pin.' };
   if (source.channel !== target.channel) return { valid: false,
     reason: `${source.channel?.toLowerCase()} outputs cannot connect to ${target.channel?.toLowerCase()} inputs.` };

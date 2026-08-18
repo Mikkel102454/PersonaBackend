@@ -78,15 +78,6 @@ public final class ProjectReferenceService {
     private static List<ProjectDeclaration> declarations(Parsed file) {
         String type = type(file.path());
         if (type == null || file.model().root() == null) return List.of();
-        if (type.equals("script")) {
-            YamlDocumentNode scripts = child(file.model().root(), "scripts");
-            if (scripts == null) return List.of();
-            return scripts.children().stream().filter(node -> validId(node.key()))
-                    .map(node -> new ProjectDeclaration("script", node.key(), file.path(),
-                            node.keyLine() < 1 ? node.startLine() : node.keyLine(),
-                            node.keyColumn() < 1 ? node.startColumn() : node.keyColumn()))
-                    .toList();
-        }
         YamlDocumentNode id = child(file.model().root(), "id");
         return id != null && "string".equals(id.kind()) && validId(id.value())
                 ? List.of(new ProjectDeclaration(type, id.value(), file.path(), id.startLine(), id.startColumn())) : List.of();
@@ -96,10 +87,6 @@ public final class ProjectReferenceService {
                                           List<ProjectReference> output) {
         if (node == null) return;
         Owner effectiveOwner = owner;
-        if (file.path().equals("scripts.yml") && node.path().startsWith("/scripts/")) {
-            String[] segments = node.path().split("/");
-            if (segments.length > 2) effectiveOwner = new Owner("script", unescape(segments[2]));
-        }
         String targetType = node.key() == null ? null : REFERENCE_KEYS.get(node.key());
         if (targetType == null && "id".equals(node.key()) && file.path().startsWith("npcs/")
                 && node.path().matches("/dialogues/\\d+/id")) targetType = "dialogue";
@@ -120,13 +107,12 @@ public final class ProjectReferenceService {
         return node.children().stream().filter(item -> key.equals(item.key())).findFirst().orElse(null);
     }
     private static String type(String path) {
-        if (path.equals("scripts.yml")) return "script";
+        if (path.startsWith("scripts/")) return "script";
         for (String type : List.of("behavior", "npc", "dialogue", "quest"))
             if (path.startsWith(type + "s/")) return type;
         return null;
     }
-    private static String declarationPath(String type, String id) { return type.equals("script")
-            ? "/scripts/" + id.replace("~", "~0").replace("/", "~1") : "/id"; }
+    private static String declarationPath(String type, String id) { return "/id"; }
     private static String unescape(String value) { return value.replace("~1", "/").replace("~0", "~"); }
     private static boolean validType(String value) { return Set.of("behavior", "npc", "dialogue", "quest", "script").contains(value); }
     private static boolean validId(String value) { return value != null && value.matches("[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}"); }

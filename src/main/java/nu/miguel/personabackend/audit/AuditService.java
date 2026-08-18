@@ -29,7 +29,7 @@ public final class AuditService {
                 Instant.now(), sanitize(details), bounded(correlationId, 128));
         store.appendAudit(event);
         try { LOG.info("{}", json.writeValueAsString(event)); }
-        catch (Exception error) { LOG.warn("Could not serialize audit event {}", event.id()); }
+        catch (Exception error) { LOG.warn("Could not serialize audit event {}", event.id(), error); }
         return event;
     }
 

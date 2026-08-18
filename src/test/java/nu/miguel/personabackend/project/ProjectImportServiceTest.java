@@ -16,25 +16,25 @@ import static org.junit.jupiter.api.Assertions.*;
 class ProjectImportServiceTest {
     private final ProjectImportService imports = new ProjectImportService();
 
-    @Test void importsYamlVerbatimWithoutRemovingCommentsOrUnknownFields() {
+    @Test void importsYamlVerbatimWithoutRemovingCommentsOrUnknownFields() throws Exception {
         String yaml = "# author comment\nid: test:actor\nextension-owned:\n  future: true\n";
         var project = imports.importFiles(List.of(new MockMultipartFile(
-                "files", "actor.yml", "application/yaml", yaml.getBytes(StandardCharsets.UTF_8))));
+                "files", "project.zip", "application/zip", zip(Map.of("npcs/actor.yml", yaml)))));
 
         assertEquals(1, project.files().size());
-        assertEquals("actor.yml", project.files().getFirst().path());
+        assertEquals("npcs/actor.yml", project.files().getFirst().path());
         assertEquals(yaml, project.files().getFirst().content());
         assertTrue(project.warnings().isEmpty());
     }
 
     @Test void importsNestedYamlFromZipAndReportsIgnoredFiles() throws Exception {
         byte[] archive = zip(Map.of(
-                "project/behaviors/tree.yml", "id: test:tree\n",
-                "project/readme.txt", "not content"));
+                "behaviors/tree.yml", "id: test:tree\n",
+                "readme.txt", "not content"));
         var project = imports.importFiles(List.of(new MockMultipartFile(
                 "files", "project.zip", "application/zip", archive)));
 
-        assertEquals(List.of("project/behaviors/tree.yml"),
+        assertEquals(List.of("behaviors/tree.yml"),
                 project.files().stream().map(file -> file.path()).toList());
         assertEquals(1, project.warnings().size());
         assertTrue(project.revision().matches("[0-9a-f]{64}"));

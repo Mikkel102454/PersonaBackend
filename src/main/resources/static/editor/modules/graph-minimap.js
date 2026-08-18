@@ -13,7 +13,11 @@ export function renderGraphMinimap({ element, positions, projection, viewport, c
   for (const [id, point] of Object.entries(positions)) {
     const rect = document.createElementNS(SVG, 'rect'); rect.setAttribute('x', point.x); rect.setAttribute('y', point.y);
     rect.setAttribute('width', String(nodeWidth)); rect.setAttribute('height', String(nodeHeight));
-    const node = nodes.get(id), classes = ['minimap-node'];
+    const node = nodes.get(id), category = node?.kind === 'event' ? 'event'
+      : node?.kind?.startsWith('flow-') ? 'flow'
+        : node?.kind === 'script-value' || node?.kind === 'graph-variables' ? 'pure'
+          : ['resource-reference', 'dialogue-registration', 'npc-anchor', 'npc-configuration'].includes(node?.kind) ? 'reference' : 'action';
+    const classes = ['minimap-node', category];
     if (selection.has(id)) classes.push('selected');
     if (node && (liveNodeKeys.has(node.title) || liveNodeKeys.has(node.yamlPath))) classes.push('live');
     if (node && [...diagnosticPaths].some(path => path && (path === node.yamlPath || path.startsWith(node.yamlPath + '/')))) classes.push('error');

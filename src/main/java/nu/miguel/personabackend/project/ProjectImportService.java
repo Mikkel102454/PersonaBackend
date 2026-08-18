@@ -38,6 +38,9 @@ public final class ProjectImportService {
             throw bad("Could not read imported project: " + e.getMessage());
         }
         if (content.isEmpty()) throw bad("The import contained no YAML files");
+        if (content.keySet().stream().anyMatch(path -> !ProjectPathRules.MANIFEST_PATH.equals(path)
+                && !ProjectPathRules.validResourcePath(path)))
+            throw bad("Imported YAML must be beneath a fixed content root or be .persona/project.yml");
 
         List<ContentFile> files = new ArrayList<>();
         MessageDigest revision = digest();
@@ -103,8 +106,7 @@ public final class ProjectImportService {
         return normalized.substring(normalized.lastIndexOf('/') + 1);
     }
     private static boolean yaml(String path) {
-        String lower = path.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".yml") || lower.endsWith(".yaml");
+        return ProjectPathRules.MANIFEST_PATH.equals(path) || ProjectPathRules.validResourcePath(path);
     }
     private static String utf8(byte[] bytes, String path) {
         try {
