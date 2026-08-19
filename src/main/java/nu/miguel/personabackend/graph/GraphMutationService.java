@@ -123,10 +123,45 @@ public final class GraphMutationService {
         List<ContentFile> rawFiles = projectContents.isEmpty() ? List.of() : projectContents.entrySet().stream()
                 .map(entry -> new ContentFile(entry.getKey(), sha256(entry.getValue()), entry.getValue())).toList();
         String revision = rawFiles.isEmpty() ? request.expectedProjectRevision() : ContentProjectRevision.compute(rawFiles);
+        Set<String> affectedResources = affectedResourceIdentities(request, operations, projectContents);
         return new GraphMutationResponse(previousDigest, digest, content, document, projection,
                 List.copyOf(affected), operations.size(), rawFiles,
                 List.copyOf(patches), projection.diagnostics(),
-                List.of(request.resourceKind() + ":" + request.resourceId()), identityRemap, revision);
+                List.copyOf(affectedResources), identityRemap, revision);
+    }
+
+    private Set<String> affectedResourceIdentities(GraphMutationRequest request,
+                                                    List<GraphMutationOperation> operations,
+                                                    Map<String, String> projectContents) {
+        LinkedHashSet<String> result = new LinkedHashSet<>();
+        result.add(request.resourceKind() + ":" + request.resourceId());
+        boolean signatureChanged = "script".equals(request.resourceKind()) && operations.stream().anyMatch(operation -> Set.of(
+                GraphMutationOperation.Type.ADD_SCRIPT_PARAMETER,
+                GraphMutationOperation.Type.RENAME_SCRIPT_PARAMETER,
+                GraphMutationOperation.Type.DELETE_SCRIPT_PARAMETER,
+                GraphMutationOperation.Type.CHANGE_SCRIPT_PARAMETER_TYPE,
+                GraphMutationOperation.Type.REORDER_SCRIPT_PARAMETER).contains(operation.type()));
+        if (!signatureChanged) return result;
+        for (var entry : projectContents.entrySet()) {
+            String kind = resourceKind(entry.getKey());
+            if (kind == null) continue;
+            YamlDocumentNode root = documents.parse(entry.getValue()).root();
+            boolean callsEditedScript = mappingNodes(root).stream().anyMatch(node -> scalarChild(node, "type", "run-script")
+                    && scalarChild(node, "script", request.resourceId()));
+            YamlDocumentNode id = child(root, "id");
+            if (callsEditedScript && id != null && id.value() != null && !id.value().isBlank())
+                result.add(kind + ":" + id.value());
+        }
+        return result;
+    }
+
+    private static String resourceKind(String path) {
+        if (path.startsWith("scripts/")) return "script";
+        if (path.startsWith("dialogues/")) return "dialogue";
+        if (path.startsWith("quests/")) return "quest";
+        if (path.startsWith("npcs/")) return "npc";
+        if (path.startsWith("behaviors/")) return "behavior";
+        return null;
     }
 
     private void rewriteScriptParameterCallSites(GraphMutationRequest request, GraphMutationOperation operation,
@@ -847,8 +882,12 @@ public final class GraphMutationService {
         if (find(root, variables + "/" + name) != null || find(root, nodes + "/" + nodeKey) != null)
             throw error(HttpStatus.CONFLICT, "VARIABLE_KEY_EXISTS",
                     "The promoted variable or generated node already exists", request.path(), variables);
-        String updated = documents.insertField(new YamlMappingInsertRequest(content, variables, name,
-                "type: " + selected.valueType())).content();
+        String variableBody = "type: " + selected.valueType();
+        String promotedDefault = selected.literal() == null ? null
+                : selected.literal().value() != null ? selected.literal().value() : selected.literal().defaultValue();
+        if (selected.direction().equals("INPUT") && promotedDefault != null)
+            variableBody += "\ndefault: " + yamlTypedScalar(promotedDefault, selected.valueType());
+        String updated = documents.insertField(new YamlMappingInsertRequest(content, variables, name, variableBody)).content();
         updated = documents.insertField(new YamlMappingInsertRequest(updated, nodes, nodeKey,
                 "type: " + (selected.direction().equals("INPUT") ? "get-variable" : "set-variable")
                         + "\nvariable: " + name)).content();
@@ -941,8 +980,13 @@ public final class GraphMutationService {
         if (descriptor != null) {
             requireSimpleKey(operation.key(), request, operation);
             String updated = content;
-            if (Set.of("ZERO_OR_ONE", "EXACTLY_ONE").contains(target.cardinality()) && inbound > 0) {
-                List<GraphEdge> replaced = graph.edges().stream().filter(edge -> edge.targetPinId().equals(target.id()))
+            boolean occupiedSource = "EXECUTION".equals(source.channel())
+                    && Set.of("ZERO_OR_ONE", "EXACTLY_ONE").contains(source.cardinality())
+                    && graph.edges().stream().anyMatch(edge -> edge.sourcePinId().equals(source.id()));
+            if (Set.of("ZERO_OR_ONE", "EXACTLY_ONE").contains(target.cardinality()) && inbound > 0 || occupiedSource) {
+                List<GraphEdge> replaced = graph.edges().stream().filter(edge -> edge.targetPinId().equals(target.id())
+                                || occupiedSource && edge.sourcePinId().equals(source.id()))
+                        .distinct()
                         .sorted(Comparator.comparing(GraphEdge::sourceYamlPath).reversed()).toList();
                 for (GraphEdge edge : replaced) {
                     String connection = parentPath(edge.sourceYamlPath());
@@ -991,7 +1035,9 @@ public final class GraphMutationService {
                         "from: "+graphEndpoint(sourceNode,source)+"\nto: "+graphEndpoint(targetNode,target)));
             }
             default -> throw unsupported(request, operation,
-                    "This content graph does not expose a compatible connect mutation");
+                    "This content graph does not expose a compatible connect mutation (source "
+                            + sourceNode.kind() + " at " + sourceNode.yamlPath() + ", target "
+                            + targetNode.kind() + " at " + targetNode.yamlPath() + ")");
         };
     }
 
@@ -1109,7 +1155,12 @@ public final class GraphMutationService {
                 case "set-player-flag" -> "- type: set-player-flag\n  name: flag\n  value: true";
                 case "get-player-string" -> "- type: get-player-string\n  name: value";
                 case "set-player-string" -> "- type: set-player-string\n  name: value\n  value: \"\"";
-                case "run-script" -> "- type: run-script\n  script: example\n  inputs: {}";
+                case "run-script" -> {
+                    String target = extensionType == null ? "example" : extensionType;
+                    if (!target.matches("[a-z0-9][a-z0-9_.:-]{0,127}"))
+                        throw new IllegalArgumentException("A reusable script ID is required");
+                    yield "- type: run-script\n  script: " + target + "\n  inputs: {}";
+                }
                 case "goto" -> {
                     if (resourceKind.equals("script")) throw new IllegalArgumentException("Goto is an inline dialogue node");
                     yield "- type: goto\n  node: start";
@@ -1121,6 +1172,12 @@ public final class GraphMutationService {
                 case "stop" -> "- type: stop";
                 case "branch" -> "- type: branch\n  condition: true";
                 case "integer-to-number", "string-to-text" -> "- type: " + nodeKind;
+                case "equals", "not-equals", "greater-than", "greater-than-or-equal", "less-than", "less-than-or-equal" -> {
+                    if (extensionType == null || !extensionType.matches("[a-z0-9][a-z0-9_.:-]{0,127}"))
+                        throw new IllegalArgumentException("A bounded nominal operand type is required");
+                    yield "- type: " + nodeKind + "\n  value-type: " + extensionType;
+                }
+                case "and", "or", "not" -> "- type: " + nodeKind;
                 case "to-string" -> {
                     if (extensionType == null || !extensionType.matches("[a-z0-9][a-z0-9_.:-]{0,127}"))
                         throw new IllegalArgumentException("A bounded nominal source type is required");

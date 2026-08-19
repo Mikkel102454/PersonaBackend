@@ -2,8 +2,12 @@ import { describePort } from './port-renderer.js';
 
 const TITLES = new Map([
   ['say', 'Say line'], ['run-script', 'Run reusable script'], ['branch', 'Boolean branch'],
-  ['do-n', 'Do N'], ['for', 'For loop'], ['for-each', 'For each']
+  ['do-n', 'Do N'], ['for', 'For loop'], ['for-each', 'For each'],
+  ['equals', '=='], ['not-equals', '!='], ['greater-than', '>'], ['greater-than-or-equal', '>='],
+  ['less-than', '<'], ['less-than-or-equal', '<='], ['and', '&&'], ['or', '||'], ['not', '!']
 ]);
+const OPERATORS = new Set(['equals', 'not-equals', 'greater-than', 'greater-than-or-equal',
+  'less-than', 'less-than-or-equal', 'and', 'or', 'not']);
 
 function operationTitle(node) {
   const type = String(node.subtitle || node.kind || '').replace(/^(?:script|flow)-/, '');
@@ -26,6 +30,7 @@ export class NodeRendererRegistry {
 
 export function defaultNodeRenderers() {
   return new NodeRendererRegistry()
+    .register(node => OPERATORS.has(node.subtitle), node => ({ title: operationTitle(node), subtitle: '', classes: [], badges: [] }))
     .register(node => node.kind?.startsWith('flow-')
       || node.kind?.startsWith('script-') && !['script-input', 'script-output'].includes(node.kind)
       || node.kind === 'extension-command', node => ({ title: operationTitle(node), subtitle: '',

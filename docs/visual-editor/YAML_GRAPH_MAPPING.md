@@ -106,6 +106,7 @@ neighboring scripts remain byte-for-byte unchanged by bounded mutations.
 | `get-variable`, `set-variable` | typed value and optional execution pins | execution-local variable name | promote/rename/retype/delete through authoritative variable operations |
 | persistent flag/string/NPC-memory getters and setters | exact typed values; setters have execution pins | key/name, scope, value | scalar edit and exact connections |
 | `value` and converter nodes | pure typed outputs; converter input/result | exact literal/type | inline default edit, connect, remove; safe converters only |
+| comparison and logical operators | exact typed `left`/`right` or boolean `value`; boolean `result` | comparison `value-type` | context-sensitive insert/connect and inline defaults |
 | `goto` | `exec`; transfer control | local node, or dialogue plus node | scalar patch/open target; dialogue graphs only |
 | `end-dialogue`, `stop` | `exec`; terminal | none | insert/move/delete in valid host graphs |
 | `choice` | `exec`; one execution output per declared option | option labels and conditions are data, never nested scripts | option edit and explicit output wires |

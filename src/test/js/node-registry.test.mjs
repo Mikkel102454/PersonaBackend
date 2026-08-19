@@ -58,6 +58,19 @@ test('context-sensitive node search matches execution and typed data outputs to 
     .some(definition => definition.nodeKind === 'quest-phase'));
 });
 
+test('offers typed comparison and boolean logic nodes from dragged data pins', () => {
+  const numbers = nodeDefinitions('script', [], 'number');
+  const greater = compatibleDefinitions(numbers, { channel: 'DATA', valueType: 'number' })
+    .find(definition => definition.nodeKind === 'greater-than');
+  assert.ok(greater);
+  assert.deepEqual(greater.inputPins.filter(pin => pin.semanticType === 'data:number').map(pin => pin.label), ['left', 'right']);
+  assert.equal(greater.valueType, 'number');
+  const booleans = compatibleDefinitions(nodeDefinitions('script', [], 'boolean'), { channel: 'DATA', valueType: 'boolean' });
+  assert.ok(booleans.some(definition => definition.nodeKind === 'equals'));
+  assert.ok(booleans.some(definition => definition.nodeKind === 'or'));
+  assert.equal(booleans.some(definition => definition.nodeKind === 'greater-than'), false);
+});
+
 test('generates readable collision-free node IDs without user input', () => {
   assert.equal(automaticNodeId({ label: 'Give item' }, []), 'give-item');
   assert.equal(automaticNodeId({ label: 'Give item' }, [{ title: 'give-item' }, { title: 'give-item-2' }]), 'give-item-3');
@@ -75,6 +88,10 @@ test('pin compatibility explains direction, semantics, cardinality replacement, 
   const input = { id: 'b:in', nodeId: 'b', direction: 'input', channel: 'EXECUTION', valueType: 'execution', semanticType: 'execution', cardinality: 'single' };
   assert.deepEqual(connectionCompatibility(output, input, { incoming: [{ id: 'old' }] }),
     { valid: true, replace: [{ id: 'old' }] });
+  const boundedOutput = { ...output, cardinality: 'ZERO_OR_ONE' };
+  assert.deepEqual(connectionCompatibility(boundedOutput, input,
+    { incoming: [{ id: 'incoming' }], outgoing: [{ id: 'outgoing' }] }).replace.map(edge => edge.id),
+    ['incoming', 'outgoing']);
   assert.match(connectionCompatibility(input, output).reason, /output pin/);
   assert.match(connectionCompatibility(output, { ...input, channel: 'DATA', valueType: 'quest', semanticType: 'data:quest' }).reason, /cannot connect/);
   assert.match(connectionCompatibility(output, input, { wouldCycle: true }).reason, /cycle/);

@@ -22,6 +22,15 @@ class GraphProjectionServiceTest {
     private final GraphProjectionService projections = new GraphProjectionService(
             documents, new ProjectReferenceService(documents), new ProjectContentRules());
 
+    @Test void scriptProjectionHidesRootContainersButPreservesUnknownYaml() {
+        String yaml = "content-version: 2\nid: flow\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\n"
+                + "connections: {}\nfuture-root: !vendor tagged\n";
+        EditorGraphProjection result = project("scripts/flow.yml", "script", "flow", "", yaml, List.of());
+        List<String> customPaths = result.nodes().stream().filter(EditorGraphProjection.GraphNode::custom)
+                .map(EditorGraphProjection.GraphNode::yamlPath).toList();
+        assertEquals(List.of("/future-root"), customPaths);
+    }
+
     @Test void behaviorProjectionHasStableRangesTypedPinsOrderedEdgesAndCustomFallback() {
         String yaml = "# header\nid: test:walk\nscope: player\nfuture-root: !vendor tagged\nroot:\n  id: root\n  type: sequence\n  children:\n    - id: first\n      type: condition\n      condition: chance\n      chance: 1.0\n    - id: second\n      type: action\n      action: set-visible\n      visible: true\n";
         EditorGraphProjection result = project("behaviors/walk.yml", "behavior", "test:walk", "", yaml, List.of());
@@ -179,7 +188,7 @@ class GraphProjectionServiceTest {
         assertEquals("INVALID_YAML", invalid.code());
 
         StringBuilder large = new StringBuilder("content-version: 2\nid: huge\ninputs: {}\noutputs: {}\nvariables: {}\nnodes:\n");
-        for (int index = 0; index <= GraphProjectionService.MAX_NODES; index++)
+        for (int index = 0; index <= GraphProjectionService.MAX_NODES + 8; index++)
             large.append("  n").append(index).append(": { type: stop }\n");
         large.append("connections: {}\n");
         GraphContractException bounded = assertThrows(GraphContractException.class, () -> project(

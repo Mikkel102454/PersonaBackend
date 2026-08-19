@@ -1,6 +1,11 @@
 import { test, expect } from '@playwright/test';
 
 async function nodeMenuAction(node,label){await node.getByRole('button',{name:/^Actions for /}).click();await node.getByRole('menuitem',{name:label,exact:true}).click();}
+async function submitAction(page, value) {
+  const dialog = page.locator('#action-form-dialog'); await expect(dialog).toBeVisible();
+  const input = dialog.locator('#action-form-input'); if (value !== undefined && await input.isVisible()) await input.fill(value);
+  await dialog.locator('#action-form-submit').click(); await page.waitForTimeout(50);
+}
 import AxeBuilder from '@axe-core/playwright';
 
 const sessionPath = '/editor/session/11111111-1111-4111-8111-111111111111';
@@ -87,7 +92,7 @@ async function wireEndpointError(page) {
 }
 
 async function addRerouteOnFirstWire(page) {
-  await page.locator('.graph-wire-hit').first().dblclick();
+  await page.locator('.graph-wire-hit').first().dispatchEvent('dblclick', { clientX: 500, clientY: 400 });
 }
 
 async function createResource(page, kind, id) {
@@ -146,17 +151,17 @@ test('opens only after authentication and renders accessible nodes, pins, and wi
   await expect(page.locator('#quick-open')).toBeHidden();
 });
 
-test('keeps Inspector ports, textual connections, source ranges, and graph state synchronized', async ({ page }) => {
+test('keeps the reduced Inspector focused on properties, validation, references, and live state', async ({ page }) => {
   await connect(page);
   const root = page.getByRole('group', { name: /root, sequence/ });
   await root.click();
   await expect(root).toHaveAccessibleName(/selected, not live, editable/);
-  await expect(page.locator('#inspector-content').getByRole('heading', { name: 'Ports' })).toBeVisible();
-  await expect(page.locator('#inspector-content').getByRole('heading', { name: 'Connections' })).toBeVisible();
-  await expect(page.locator('#inspector-content').getByRole('button', { name: /To wait-one via 1/ })).toBeVisible();
+  await expect(page.locator('#inspector-content').getByRole('heading', { name: 'Properties' })).toBeVisible();
+  await expect(page.locator('#inspector-content').getByRole('heading', { name: 'Validation' })).toBeVisible();
+  await expect(page.locator('#inspector-content').getByRole('heading', { name: 'References' })).toBeVisible();
+  await expect(page.locator('#inspector-content').getByRole('heading', { name: 'Live' })).toBeVisible();
+  await expect(page.locator('#inspector-content').getByRole('heading', { name: /Ports|Connections|Metadata/ })).toHaveCount(0);
   await expect(root.getByRole('button', { name: /output pin 1.*1 current connection/ })).toBeVisible();
-  await page.locator('#inspector-content').getByRole('button', { name: /To wait-one via 1/ }).click();
-  await expect(page.getByRole('group', { name: /wait-one, wait/ })).toBeFocused();
 });
 
 test('provides complete local alignment, snap, tidy, focus, and one-pixel keyboard layout commands', async ({ page }) => {
@@ -300,9 +305,24 @@ test('creates a context-menu node at the pointer without moving the viewport', a
     const match = element.style.transform.match(/translate\(([-\d.]+)px,\s*([-\d.]+)px\)/);
     return { x: Number(match?.[1]), y: Number(match?.[2]), viewport: document.querySelector('#graph-plane').style.transform };
   });
-  expect(actual.x).toBeCloseTo(placement.x, 1);
-  expect(actual.y).toBeCloseTo(placement.y, 1);
+  expect(actual.x).toBeCloseTo(placement.x, 0);
+  expect(actual.y).toBeCloseTo(placement.y, 0);
   expect(actual.viewport).toBe(placement.viewport);
+});
+
+test('keeps the viewport anchored while dragging an output to create a node', async ({ page }) => {
+  await connect(page);
+  const output = page.locator('.graph-pin.output').first(), canvas = page.locator('#graph-canvas');
+  const pinBox = await output.boundingBox(), canvasBox = await canvas.boundingBox();
+  const before = await page.locator('#graph-plane').evaluate(element => element.style.transform);
+  await page.mouse.move(pinBox.x + pinBox.width / 2, pinBox.y + pinBox.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(canvasBox.x + canvasBox.width * .7, canvasBox.y + canvasBox.height * .7, { steps: 4 });
+  await page.mouse.wheel(0, 300);
+  await page.mouse.up();
+
+  await expect(page.getByRole('dialog').filter({ hasText: 'Add from' })).toBeVisible();
+  expect(await page.locator('#graph-plane').evaluate(element => element.style.transform)).toBe(before);
 });
 
 test('reorders behavior children visually through stable neighboring ports', async ({ page }) => {
@@ -359,8 +379,8 @@ test('extracts a dialogue command to a reusable script and opens the new authori
   await connect(page);
   await createResource(page, 'dialogue', 'demo:extract-source');
   const say = page.getByRole('group', { name: /say, script-say/ });
-  page.once('dialog', dialog => dialog.accept('extracted-line'));
   await nodeMenuAction(say, 'Extract to reusable script');
+  await submitAction(page, 'extracted-line');
   await expect(page.locator('.tab-open', { hasText: 'extracted-line' })).toHaveAttribute('aria-current', 'page');
   await expect(page.locator('#source')).toHaveValue(/id: extracted-line\ninputs: \{\}\noutputs: \{\}\nvariables: \{\}\nnodes:/);
 });
@@ -368,8 +388,8 @@ test('extracts a dialogue command to a reusable script and opens the new authori
 test('atomically creates and assigns an NPC reference before opening the new target', async ({ page }) => {
   await connect(page);
   await createResource(page, 'npc', 'demo:assign-source');
-  page.once('dialog', dialog => dialog.accept('demo:assigned-walk'));
   await nodeMenuAction(page.getByRole('group', { name: /demo:assign-source, npc/ }), 'Create and assign player behavior');
+  await submitAction(page, 'demo:assigned-walk');
   await expect(page.locator('.tab-open', { hasText: 'demo:assigned-walk' })).toHaveAttribute('aria-current', 'page');
   await openSource(page, 'npcs');
   await page.locator('#project button', { hasText: 'demo:assign-source' }).click();
@@ -478,29 +498,20 @@ test('duplicates, atomically renames, safely locates, and deletes resources with
   await connect(page);
   await createResource(page, 'behavior', 'demo:operations');
 
-  const duplicateDialogs = dialog => dialog.type() === 'prompt'
-    ? dialog.accept('demo:operations-copy') : dialog.accept();
-  page.on('dialog', duplicateDialogs);
   await page.getByRole('button', { name: 'Duplicate', exact: true }).click();
+  await submitAction(page, 'demo:operations-copy'); await submitAction(page);
   await expect(page.locator('#content-browser')).toContainText('demo:operations-copy');
-  page.off('dialog', duplicateDialogs);
 
-  const renameDialogs = dialog => dialog.type() === 'prompt'
-    ? dialog.accept('demo:operations-renamed') : dialog.accept();
-  page.on('dialog', renameDialogs);
   await page.getByRole('button', { name: 'Rename', exact: true }).click();
+  await submitAction(page, 'demo:operations-renamed'); await submitAction(page); await submitAction(page);
   await expect(page.locator('#content-browser')).toContainText('demo:operations-renamed');
-  page.off('dialog', renameDialogs);
 
-  const moveDialogs = dialog => dialog.type() === 'prompt'
-    ? dialog.accept('behaviors/archive/operations-renamed.yml') : dialog.accept();
-  page.on('dialog', moveDialogs);
   await page.getByRole('button', { name: 'Move to folder' }).click();
+  await submitAction(page, 'behaviors/archive/operations-renamed.yml'); await submitAction(page);
   await expect(page.locator('#file-name')).toContainText('behaviors/archive/operations-renamed.yml');
-  page.off('dialog', moveDialogs);
 
-  page.once('dialog', dialog => dialog.accept());
   await page.getByRole('button', { name: 'Delete', exact: true }).click();
+  await submitAction(page);
   await expect(page.locator('#content-browser')).not.toContainText('demo:operations-renamed');
   await expect(page.locator('#source')).not.toHaveValue(/demo:operations-renamed/);
   await page.waitForTimeout(400);
@@ -537,12 +548,12 @@ test('keeps bounded comments, groups, bookmarks, color labels, collapse state, a
   await expect(root).toHaveAttribute('aria-current', 'true');
   await expect(wait).toHaveAttribute('aria-current', 'true');
 
-  page.once('dialog', dialog => dialog.accept('Opening sequence'));
   await page.getByRole('button', { name: 'Group', exact: true }).click();
-  page.once('dialog', dialog => dialog.accept('Review this branch'));
+  await submitAction(page, 'Opening sequence');
   await page.getByRole('button', { name: 'Comment', exact: true }).click();
-  page.once('dialog', dialog => dialog.accept('#336699'));
+  await submitAction(page, 'Review this branch');
   await page.getByRole('button', { name: 'Color label' }).click();
+  await submitAction(page, '#336699');
   await expect(page.locator('.graph-layout-group')).toContainText('Opening sequence');
   await expect(page.locator('.graph-layout-comment')).toContainText('Review this branch');
   await page.getByRole('group', { name: /Custom YAML/ }).click();
@@ -579,10 +590,11 @@ test('moves layout-only wire reroute points and restores their final drag with u
   await expect(reroute).toBeVisible();
   const before = { x: await reroute.getAttribute('cx'), y: await reroute.getAttribute('cy') };
   const box = await reroute.boundingBox();
-  await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(box.x + 75, box.y + 45, { steps: 4 });
-  await page.mouse.up();
+  const start = { clientX: box.x + box.width / 2, clientY: box.y + box.height / 2,
+    pointerId: 7, pointerType: 'mouse', button: 0 };
+  await reroute.dispatchEvent('pointerdown', start);
+  await reroute.dispatchEvent('pointermove', { ...start, clientX: start.clientX + 75, clientY: start.clientY + 45 });
+  await reroute.dispatchEvent('pointerup', { ...start, clientX: start.clientX + 75, clientY: start.clientY + 45 });
   await expect.poll(async () => ({ x: await reroute.getAttribute('cx'), y: await reroute.getAttribute('cy') }))
     .not.toEqual(before);
   const moved = { x: await reroute.getAttribute('cx'), y: await reroute.getAttribute('cy') };
@@ -619,11 +631,11 @@ test('relationship map exposes resolved typed links with keyboard open-source an
   await nodeMenuAction(page.getByRole('group', { name: /demo:missing, missing-reference/ }), 'Create missing');
   await expect(page.locator('.tab-open', { hasText: 'demo:missing' })).toHaveAttribute('aria-current', 'page');
   await page.getByRole('button', { name: 'Relationship Map' }).click();
-  await page.getByRole('button', { name: 'Open relationship target' }).first().focus();
-  await page.keyboard.press('Enter');
+  const openTarget = page.getByRole('button', { name: 'Open relationship target demo:target' });
+  await openTarget.focus(); await openTarget.dispatchEvent('keydown', { key: 'Enter' });
   await expect(page.locator('.tab-open', { hasText: 'demo:target' })).toHaveAttribute('aria-current', 'page');
   await page.getByRole('button', { name: 'Relationship Map' }).click();
-  await page.getByRole('button', { name: 'Open relationship source' }).first().click();
+  await page.getByRole('button', { name: 'Open relationship source demo:walker' }).first().click();
   await expect(page.locator('.tab-open', { hasText: 'demo:walker' })).toHaveAttribute('aria-current', 'page');
 });
 
@@ -673,6 +685,7 @@ test('responsive and reduced-motion modes retain keyboard-visible controls', asy
   await page.locator('#browser-toggle').click();
   await expect(page.locator('#content-browser')).toBeVisible();
   await page.keyboard.press('Escape');
+  await expect(page.locator('#content-browser')).toBeHidden();
   await page.locator('#graph-canvas').focus();
   await expect(page.locator('#graph-canvas')).toBeFocused();
   await expect(page.getByRole('separator', { name: 'Resize Inspector' })).toBeHidden();

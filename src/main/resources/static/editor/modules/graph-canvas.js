@@ -2,6 +2,7 @@ import { deterministicLayout } from './graph-layout.js';
 import { fitViewport, normalizeViewport } from './graph-viewport.js';
 import { defaultNodeRenderers } from './node-renderer.js';
 import { connectionCompatibility } from './connection-rules.js';
+import { requestConfirm, requestText } from './action-form.js';
 import { normalizeProjection } from './graph-projection.js';
 import { GraphSelection } from './graph-selection.js';
 
@@ -42,6 +43,7 @@ export class GraphCanvas {
     this.focusedNodes = null;
     this.pendingPin = null;
     this.pendingReconnectEdge = null;
+    this.connectionDrag = false;
     this.previewPath = null;
     this.renderFrame = null;
     this.wireFrame = null;
@@ -502,8 +504,13 @@ export class GraphCanvas {
     return (this.projection?.edges || []).filter(edge => edge.targetPinId === pinId);
   }
 
+  outgoing(pinId) {
+    return (this.projection?.edges || []).filter(edge => edge.sourcePinId === pinId);
+  }
+
   compatible(source, target) {
     return connectionCompatibility(source, target, { incoming: target ? this.incoming(target.id) : [],
+      outgoing: source ? this.outgoing(source.id) : [],
       wouldCycle: Boolean(source && target && this.wouldCycle(source.nodeId, target.nodeId)),
       capabilities: this.projection?.capabilities || [], resourceScope: 'CURRENT_RESOURCE' });
   }
@@ -566,8 +573,10 @@ export class GraphCanvas {
       const outgoing = (this.projection?.edges || []).filter(edge => edge.sourcePinId === pin.id);
       if (outgoing.length === 1) reconnect = outgoing[0];
     }
-    event.stopPropagation();
+    event.preventDefault(); event.stopPropagation();
     const startX = event.clientX, startY = event.clientY;
+    const startViewport = { ...this.viewport };
+    this.connectionDrag = true;
     button.setPointerCapture(event.pointerId);
     const move = current => {
       if (Math.hypot(current.clientX - startX, current.clientY - startY) < 4 && !this.previewPath) return;
@@ -577,6 +586,7 @@ export class GraphCanvas {
     };
     const end = current => {
       button.removeEventListener('pointermove', move);
+      this.connectionDrag = false;
       this.clearPinHighlights();
       const dragged = Boolean(this.previewPath);
       this.removeConnectionPreview();
@@ -584,20 +594,28 @@ export class GraphCanvas {
       const targetElement = document.elementFromPoint(current.clientX, current.clientY)?.closest?.('.graph-pin');
       const target = targetElement ? this.pin(targetElement.dataset.pinId) : null;
       if (target) this.connectPins(source, target, reconnect);
-      else this.options.onPalette?.({ clientX: current.clientX, clientY: current.clientY, sourcePin: source });
+      else {
+        this.viewport = startViewport; this.applyViewport(); this.scheduleViewportRender();
+        this.options.onPalette?.({ clientX: current.clientX, clientY: current.clientY, sourcePin: source,
+          graphPosition: this.screenToGraph(current.clientX, current.clientY) });
+      }
+    };
+    const cancel = () => {
+      button.removeEventListener('pointermove', move); this.connectionDrag = false;
+      this.clearPinHighlights(); this.removeConnectionPreview();
     };
     button.addEventListener('pointermove', move);
     button.addEventListener('pointerup', end, { once: true });
-    button.addEventListener('pointercancel', end, { once: true });
+    button.addEventListener('pointercancel', cancel, { once: true });
   }
 
-  connectPins(source, target, reconnectEdge = null) {
+  async connectPins(source, target, reconnectEdge = null) {
     const check = this.compatible(source, target);
     if (!check.valid) {
       const safeAutocast = source.channel === 'DATA' && target.channel === 'DATA'
         && (source.valueType === 'integer' && target.valueType === 'number'
           || source.valueType === 'string' && target.valueType === 'text');
-      if (safeAutocast && !reconnectEdge && confirm(`Insert a visible ${source.valueType} → ${target.valueType} converter?`)) {
+      if (safeAutocast && !reconnectEdge && await requestConfirm(`Insert a visible ${source.valueType} → ${target.valueType} converter?`, 'Insert converter')) {
         this.options.onConnect?.({ source, target, operations: [{ type: 'CONNECT_WITH_AUTOCAST',
           sourcePinId: source.id, targetPinId: target.id,
           key: `wire-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}` }] }); return;
@@ -610,12 +628,7 @@ export class GraphCanvas {
         sourcePinId: source.id, targetPinId: target.id });
       this.options.onConnect?.({ source, target, operations }); return;
     }
-    for (const edge of this.projection.resourceKind === 'behavior' ? [] : check.replace || []) {
-      if (edge.sourcePinId === source.id) continue;
-      operations.push({ type: 'RECONNECT', edgeId: edge.id,
-        sourcePinId: source.id, targetPinId: target.id });
-    }
-    if (!operations.length) operations.push({ type: 'CONNECT', sourcePinId: source.id, targetPinId: target.id,
+    operations.push({ type: 'CONNECT', sourcePinId: source.id, targetPinId: target.id,
       key: `wire-${crypto.randomUUID().replaceAll('-', '').slice(0, 12)}` });
     this.options.onConnect?.({ source, target, operations });
   }
@@ -752,8 +765,9 @@ export class GraphCanvas {
           control.setAttribute('class', 'graph-wire-control relationship-action');
           control.setAttribute('cx', String((x1 + x2) / 2)); control.setAttribute('cy', String((y1 + y2) / 2 + offset));
           control.setAttribute('r', '10'); control.setAttribute('tabindex', '0'); control.setAttribute('role', 'button');
-          control.setAttribute('aria-label', `Open relationship ${direction}`);
-          const open = () => this.options.onOpenRelationshipNode?.(this.projection.nodes.find(node => node.id === nodeId), direction);
+          const relatedNode = this.projection.nodes.find(node => node.id === nodeId);
+          control.setAttribute('aria-label', `Open relationship ${direction} ${relatedNode?.title || 'resource'}`);
+          const open = () => this.options.onOpenRelationshipNode?.(relatedNode, direction);
           control.addEventListener('click', open);
           control.addEventListener('keydown', event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); open(); } });
           fragment.append(control);
@@ -790,7 +804,7 @@ export class GraphCanvas {
   startRerouteDrag(event, edgeId, index, target) {
     if (event.pointerType !== 'touch' && event.button !== 0) return; event.preventDefault(); event.stopPropagation();
     const before = this.snapshot(), start = { x: event.clientX, y: event.clientY }, point = this.reroutes[edgeId][index];
-    const initial = { ...point }; let moved = false; target.setPointerCapture(event.pointerId);
+    const initial = { ...point }; let moved = false;
     const move = current => { moved = true; point.x = initial.x + (current.clientX - start.x) / this.viewport.zoom;
       point.y = initial.y + (current.clientY - start.y) / this.viewport.zoom;
       target.setAttribute('cx', String(point.x)); target.setAttribute('cy', String(point.y)); };
@@ -799,6 +813,7 @@ export class GraphCanvas {
       if (moved) { this.schedule(); this.layoutCommand(before); } };
     target.addEventListener('pointermove', move); target.addEventListener('pointerup', end, { once: true });
     target.addEventListener('pointercancel', end, { once: true });
+    try { target.setPointerCapture(event.pointerId); } catch { /* Synthetic/assistive pointer events may not be capturable. */ }
   }
 
   select(id, additive) {
@@ -826,9 +841,9 @@ export class GraphCanvas {
     requestAnimationFrame(() => this.nodesLayer.querySelector('[data-node-id="' + CSS.escape(id) + '"]')?.focus());
   }
 
-  findCurrentGraph() {
+  async findCurrentGraph() {
     if (!this.projection) return;
-    const query=prompt('Find node or field in the current graph','')?.trim().toLowerCase();if(!query)return;
+    const query=(await requestText('Find node or field in the current graph',''))?.trim().toLowerCase();if(!query)return;
     const matches=this.projection.nodes.filter(node=>[node.title,node.subtitle,node.kind,node.yamlPath,
       ...(node.fields||[]).flatMap(field=>[field.label,field.value]),
       ...(node.pins||[]).flatMap(pin=>[pin.label,pin.valueType,pin.literal?.value])].some(value=>String(value||'').toLowerCase().includes(query)));
@@ -837,8 +852,8 @@ export class GraphCanvas {
     this.options.onSelection(matches);requestAnimationFrame(()=>this.nodesLayer.querySelector(`[data-node-id="${CSS.escape(matches[0].id)}"]`)?.focus());
   }
 
-  bookmarkViewport() {
-    const name=prompt('Name this viewport bookmark',`View ${this.viewportBookmarks.length+1}`)?.trim();if(!name)return;
+  async bookmarkViewport() {
+    const name=(await requestText('Name this viewport bookmark',`View ${this.viewportBookmarks.length+1}`))?.trim();if(!name)return;
     const context=this.options.viewportContext?.()||{};
     const bookmark={name:name.slice(0,80),viewport:{...this.viewport},resourceIdentity:context.resourceIdentity||this.projection?.resourceIdentity,
       nestedGraph:context.nestedGraph?structuredClone(context.nestedGraph):null};
@@ -850,10 +865,10 @@ export class GraphCanvas {
     this.changed();
   }
 
-  quickJump() {
+  async quickJump() {
     const bookmarks=this.globalViewportBookmarks();
     if(!bookmarks.length){this.options.onConnectionError?.('This project has no named viewport bookmarks.');return;}
-    const choice=prompt(`Quick jump:\n${bookmarks.map((value,index)=>`${index+1}. ${value.name}`).join('\n')}`,'1')?.trim();
+    const choice=(await requestText(`Quick jump:\n${bookmarks.map((value,index)=>`${index+1}. ${value.name}`).join('\n')}`,'1'))?.trim();
     const target=/^\d+$/.test(choice||'')?bookmarks[Number(choice)-1]
       :bookmarks.find(value=>value.name.toLowerCase()===choice?.toLowerCase());if(!target)return;
     if(this.options.onViewportJump)this.options.onViewportJump(target);else this.restoreViewport(target.viewport);
@@ -940,6 +955,7 @@ export class GraphCanvas {
 
   zoom(event) {
     event.preventDefault();
+    if (this.connectionDrag) return;
     const bounds = this.canvas.getBoundingClientRect(), x = event.clientX - bounds.left, y = event.clientY - bounds.top;
     const worldX = (x - this.viewport.x) / this.viewport.zoom, worldY = (y - this.viewport.y) / this.viewport.zoom;
     const next = Math.max(.2, Math.min(2.5, this.viewport.zoom * Math.exp(-event.deltaY * .001)));

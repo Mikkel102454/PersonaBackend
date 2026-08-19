@@ -1,5 +1,6 @@
 import { CONTENT_WINDOW, boundedResources, resourceMatches } from './content-browser.js';
 import { closeTabsToRight, reorderTabs } from './resource-tabs.js';
+import { requestText } from './action-form.js';
 
 const GROUPS = [
   ['npc', 'NPCs'], ['dialogue', 'Dialogues'], ['quest', 'Quests'],
@@ -260,9 +261,9 @@ export class WorkspaceShell {
     action('New Folder', () => this.options.createFolder?.(folder));
     action('Create Resource Here', () => this.options.createHere?.(folder));
     action('Rename', () => this.options.moveFolder?.(folder), root);
-    action('Move', () => {
+    action('Move', async () => {
       const parent = folder.includes('/') ? folder.slice(0, folder.lastIndexOf('/')) : folder;
-      const destination = prompt(`Move ${folder} beneath folder:`, parent);
+      const destination = await requestText(`Move ${folder} beneath folder:`, parent);
       if (destination && destination !== parent) this.options.moveFolder?.(folder, destination);
     }, root);
     action('Delete', () => this.options.deleteFolder?.(folder), root);
@@ -270,7 +271,7 @@ export class WorkspaceShell {
       this.preferences.folderFavorites.has(folder) ? this.preferences.folderFavorites.delete(folder) : this.preferences.folderFavorites.add(folder);
       this.savePreferences(); this.renderSources();
     });
-    action('Set Local Color', () => { const color = prompt('Folder color (CSS hex)', this.preferences.folderColors[folder] || '#5d77a8');
+    action('Set Local Color', async () => { const color = await requestText('Folder color (CSS hex)', this.preferences.folderColors[folder] || '#5d77a8');
       if (color && /^#[0-9a-f]{6}$/i.test(color)) { this.preferences.folderColors[folder] = color; this.savePreferences(); this.renderSources(); } });
     action('Copy Path', () => navigator.clipboard?.writeText(folder));
     document.body.append(menu); menu.querySelector('button:not(:disabled)')?.focus();

@@ -1,5 +1,5 @@
 /** Pure client-side advisory checks. The server repeats every rule authoritatively. */
-export function connectionCompatibility(source, target, { incoming = [], wouldCycle = false, capabilities = [], resourceScope = 'CURRENT_RESOURCE' } = {}) {
+export function connectionCompatibility(source, target, { incoming = [], outgoing = [], wouldCycle = false, capabilities = [], resourceScope = 'CURRENT_RESOURCE' } = {}) {
   if (!source || !target) return { valid: false, reason: 'Choose two existing pins.' };
   if (String(source.direction).toUpperCase() !== 'OUTPUT' || String(target.direction).toUpperCase() !== 'INPUT')
     return { valid: false, reason: 'Connections run from an output pin to an input pin.' };
@@ -26,5 +26,8 @@ export function connectionCompatibility(source, target, { incoming = [], wouldCy
   if (source.nodeId === target.nodeId) return { valid: false, reason: 'A node cannot connect to itself.' };
   const cyclesAllowed = source.compatibility?.cyclePolicy === 'ALLOW' && target.compatibility?.cyclePolicy === 'ALLOW';
   if (wouldCycle && !cyclesAllowed) return { valid: false, reason: 'That connection would create a cycle that is not allowed here.' };
-  return { valid: true, replace: ['single', 'EXACTLY_ONE', 'ZERO_OR_ONE'].includes(target.cardinality) ? incoming : [] };
+  const replace = ['single', 'EXACTLY_ONE', 'ZERO_OR_ONE'].includes(target.cardinality) ? [...incoming] : [];
+  if (source.channel === 'EXECUTION' && ['single', 'EXACTLY_ONE', 'ZERO_OR_ONE'].includes(source.cardinality))
+    replace.push(...outgoing);
+  return { valid: true, replace: [...new Map(replace.map(edge => [edge.id, edge])).values()] };
 }

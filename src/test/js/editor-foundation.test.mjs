@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import { createWorkspaceState } from '../../main/resources/static/editor/modules/workspace-state.js';
 import { liveNodeKeys } from '../../main/resources/static/editor/modules/live-overlays.js';
 import { nestedProjection, normalizeProjection } from '../../main/resources/static/editor/modules/graph-projection.js';
@@ -11,13 +12,34 @@ import { fitViewport } from '../../main/resources/static/editor/modules/graph-vi
 import { connectionsForNode } from '../../main/resources/static/editor/modules/graph-connections.js';
 import { boundedResources, resourceMatches } from '../../main/resources/static/editor/modules/content-browser.js';
 import { closeTabsToRight, reorderTabs } from '../../main/resources/static/editor/modules/resource-tabs.js';
-import { inlineDefaultOperation } from '../../main/resources/static/editor/modules/graph-mutations.js';
+import { inlineDefaultOperation, resourceDropCreateOperation,
+  defaultResourceDropOwner } from '../../main/resources/static/editor/modules/graph-mutations.js';
+import { invalidateAffectedProjections } from '../../main/resources/static/editor/modules/projection-cache.js';
+
+test('uses the reusable action form instead of browser-native popup APIs', async () => {
+  const sources = await Promise.all([
+    '../../main/resources/static/editor/app.js',
+    '../../main/resources/static/editor/modules/graph-canvas.js',
+    '../../main/resources/static/editor/modules/workspace-shell.js'
+  ].map(path => readFile(new URL(path, import.meta.url), 'utf8')));
+  for (const source of sources) assert.doesNotMatch(source, /\b(?:prompt|confirm|alert)\s*\(/);
+});
 
 test('keeps normalized editor domains separate and bounds forged viewport metadata', () => {
   const state = createWorkspaceState();
   assert.notEqual(state.files, state.documentModels);
   assert.notEqual(state.graphProjections, state.histories);
   assert.deepEqual(normalizeViewport({ x: Infinity, y: -999999, zoom: 99 }), { x: 40, y: -100000, zoom: 2.5 });
+});
+
+test('invalidates cached callers when a reusable script signature changes', () => {
+  const projections = new Map([
+    ['script:target', { revision: 'new' }],
+    ['script:caller', { revision: 'stale' }],
+    ['behavior:unrelated', { revision: 'stable' }]
+  ]);
+  invalidateAffectedProjections(projections, ['script:target', 'script:caller'], 'script:target');
+  assert.deepEqual([...projections.keys()], ['script:target', 'behavior:unrelated']);
 });
 
 test('derives live overlays and nested views without mutating authoritative projections', () => {
@@ -55,6 +77,7 @@ test('uses one renderer interface for built-in, custom, and schema-owned nodes a
     { title: 'Say line', subtitle: '', classes: [], badges: [] });
   assert.equal(renderers.describeNode({ title: 'reward-3', subtitle: 'give-item', kind: 'script-give-item' }).title,
     'Give Item');
+  assert.equal(renderers.describeNode({ title: 'either', subtitle: 'or', kind: 'script-value' }).title, '||');
   assert.equal(renderers.describeNode({ title: 'Input', subtitle: 'demo:flow', kind: 'script-input' }).title, 'Input');
   assert.match(renderers.describePin({ direction: 'input', label: 'in', semanticType: 'execution',
     cardinality: 'single', required: true }).ariaLabel, /required/);
@@ -67,6 +90,18 @@ test('uses pin-default mutations for keyed graphs embedded in every resource kin
     { type: 'SET_PIN_DEFAULT', targetPinId: 'pin', value: 'DIAMOND' });
   assert.deepEqual(inlineDefaultOperation({ resourceKind: 'behavior', nodes: [{ id: 'node', yamlPath: '/root' }] }, pin, '2s'),
     { type: 'EDIT_FIELD', yamlPath: pin.yamlPath, value: '2s' });
+});
+
+test('always drops a script resource as a run-script call node', () => {
+  assert.deepEqual(resourceDropCreateOperation({ kind: 'script', id: 'demo:target' }, '/on-click/nodes', 'call'), {
+    type: 'INSERT', parentYamlPath: '/on-click/nodes', key: 'call', nodeKind: 'run-script', value: 'demo:target'
+  });
+});
+
+test('defaults blank NPC resource drops to On Click regardless of projection order', () => {
+  const onDamage = { kind: 'event', yamlPath: '/on-damage' };
+  const onClick = { kind: 'event', yamlPath: '/on-click' };
+  assert.equal(defaultResourceDropOwner([onDamage, onClick], 'npc'), onClick);
 });
 
 test('fails closed on unsupported projection protocols and normalizes v3 ports', () => {

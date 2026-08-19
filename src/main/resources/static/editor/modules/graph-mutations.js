@@ -92,3 +92,17 @@ export function inlineDefaultOperation(projection, pin, value) {
     ? { type: 'SET_PIN_DEFAULT', targetPinId: pin.id, value }
     : { type: 'EDIT_FIELD', yamlPath: pin.yamlPath, value };
 }
+
+export function resourceDropCreateOperation(resource, parentYamlPath, key) {
+  return resource.kind === 'script'
+    ? { type: 'INSERT', parentYamlPath, key, nodeKind: 'run-script', value: resource.id }
+    : { type: 'CREATE_VALUE_NODE', parentYamlPath, key, value: resource.id, valueType: resource.kind };
+}
+
+export function defaultResourceDropOwner(nodes, resourceKind) {
+  if (resourceKind === 'npc') {
+    const onClick = (nodes || []).find(node => node.kind === 'event' && node.yamlPath?.endsWith('/on-click'));
+    if (onClick) return onClick;
+  }
+  return (nodes || []).find(node => ['event', 'script-input'].includes(node.kind)) || null;
+}

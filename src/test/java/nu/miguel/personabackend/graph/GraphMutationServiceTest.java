@@ -517,7 +517,14 @@ class GraphMutationServiceTest {
         GraphMutationResponse promoted=mutations.mutate(request("script","flow",cast.content(),List.of(
                 advanced(GraphMutationOperation.Type.PROMOTE_TO_VARIABLE,null,null,duration,"delay",null,null,null))));
         assertTrue(promoted.content().contains("delay:\n    type: duration"));
+        assertTrue(promoted.content().contains("default: 1s"));
         assertTrue(promoted.content().contains("type: get-variable\n    variable: delay"));
+        var variables=promoted.projection().nodes().stream().filter(node->node.kind().equals("graph-variables")).findFirst().orElseThrow();
+        var delayField=variables.fields().stream().filter(field->field.label().equals("delay")).findFirst().orElseThrow();
+        assertEquals("/variables/delay/default",delayField.yamlPath());assertEquals("1s",delayField.value());assertTrue(delayField.editable());
+        GraphMutationResponse changedDefault=mutations.mutate(request("script","flow",promoted.content(),List.of(
+                op(GraphMutationOperation.Type.EDIT_FIELD,delayField.yamlPath(),null,null,null,null,null,null,"2s",null))));
+        assertEquals("2s",find(documents.parse(changedDefault.content()).root(),"/variables/delay/default").value());
         GraphMutationResponse renamed=mutations.mutate(request("script","flow",promoted.content(),List.of(
                 advanced(GraphMutationOperation.Type.RENAME_VARIABLE,"/variables",null,null,null,null,"delay","pause-delay"))));
         assertTrue(renamed.content().contains("pause-delay:")&&renamed.content().contains("variable: \"pause-delay\""));
@@ -533,6 +540,72 @@ class GraphMutationServiceTest {
         GraphContractException used=assertThrows(GraphContractException.class,()->mutations.mutate(request("script","flow",disconnected.content(),List.of(
                 advanced(GraphMutationOperation.Type.DELETE_VARIABLE,"/variables",null,null,null,null,"pause-delay",null)))));
         assertEquals("VARIABLE_IN_USE",used.code());
+    }
+
+    @Test void insertsAndProjectsTypedComparisonAndBooleanOperatorNodes() {
+        String source="content-version: 2\nid: flow\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n";
+        GraphMutationResponse comparison=mutate("script","flow",source,
+                op(GraphMutationOperation.Type.INSERT,null,null,"/nodes",null,null,"equals","same","integer",null));
+        assertTrue(comparison.content().contains("type: equals\n    value-type: integer"));
+        var same=comparison.projection().nodes().stream().filter(node->node.title().equals("same")).findFirst().orElseThrow();
+        assertEquals(List.of("left","right","result"),same.pins().stream().map(EditorGraphProjection.GraphPin::label).toList());
+        assertEquals("boolean",same.pins().getLast().valueType());
+        GraphMutationResponse logical=mutate("script","flow",comparison.content(),
+                op(GraphMutationOperation.Type.INSERT,null,null,"/nodes",null,null,"or","either",null,null));
+        var either=logical.projection().nodes().stream().filter(node->node.title().equals("either")).findFirst().orElseThrow();
+        assertTrue(either.pins().stream().allMatch(pin->pin.valueType().equals("boolean")));
+    }
+
+    @Test void insertsRunScriptCallsWithTheDroppedTargetSignature() {
+        String source="content-version: 2\nid: flow\ninputs: {}\noutputs: {}\nvariables: {}\nnodes: {}\nconnections: {}\n";
+        GraphMutationResponse result=mutate("script","flow",source,
+                op(GraphMutationOperation.Type.INSERT,null,null,"/nodes",null,null,"run-script","call","target:flow",null));
+        assertTrue(result.content().contains("type: run-script\n    script: target:flow\n    inputs: {}"));
+    }
+
+    @Test void addingAStartOutputInvalidatesCallersAndProjectsItAsACallInput() {
+        String target = "content-version: 2\nid: target\ninputs: {}\noutputs:\n"
+                + "  message: { type: text }\nvariables: {}\nnodes: {}\nconnections: {}\n";
+        String caller = "content-version: 2\nid: caller\ndisplay-name: Caller\non-click:\n"
+                + "  variables: {}\n  nodes:\n    call: { type: run-script, script: target, inputs: {} }\n"
+                + "    show: { type: message, text: fallback }\n  connections:\n"
+                + "    returned-message: { from: call.message, to: show.text }\n";
+        List<ContentFile> files = List.of(file("scripts/target.yml", target), file("npcs/caller.yml", caller));
+        GraphMutationOperation add = advanced(GraphMutationOperation.Type.ADD_SCRIPT_PARAMETER,
+                "/inputs", null, null, "message", "text", null, null);
+        GraphMutationRequest request = new GraphMutationRequest(EditorGraphProjection.VERSION,
+                "scripts/target.yml", "script", "target", "", target, sha(target), files, List.of(add));
+
+        GraphMutationResponse result = mutations.mutate(request);
+
+        assertTrue(result.affectedResourceIds().contains("npc:caller"));
+        EditorGraphProjection callerProjection = projections.project(new GraphProjectionRequest(
+                "npcs/caller.yml", "npc", "caller", "", caller, sha(caller), result.rawFiles()), List.of(), "none");
+        EditorGraphProjection.GraphNode call = callerProjection.nodes().stream()
+                .filter(node -> node.kind().equals("script-call")).findFirst().orElseThrow();
+        assertTrue(call.pins().stream().anyMatch(pin -> pin.direction().equals("INPUT")
+                && pin.channel().equals("DATA") && pin.label().equals("message") && pin.valueType().equals("text")));
+        assertTrue(call.pins().stream().anyMatch(pin -> pin.direction().equals("OUTPUT")
+                && pin.channel().equals("DATA") && pin.label().equals("message") && pin.valueType().equals("text")));
+        EditorGraphProjection.GraphEdge returned = callerProjection.edges().stream()
+                .filter(edge -> edge.label().equals("returned-message")).findFirst().orElseThrow();
+        assertTrue(call.pins().stream().filter(pin -> pin.direction().equals("OUTPUT") && pin.label().equals("message"))
+                .anyMatch(pin -> pin.id().equals(returned.sourcePinId())));
+
+        EditorGraphProjection.GraphNode event = callerProjection.nodes().stream()
+                .filter(node -> node.kind().equals("event") && node.title().equals("On Click")).findFirst().orElseThrow();
+        String eventExec = event.pins().stream().filter(pin -> pin.direction().equals("OUTPUT")
+                && pin.label().equals("exec")).findFirst().orElseThrow().id();
+        String callExec = call.pins().stream().filter(pin -> pin.direction().equals("INPUT")
+                && pin.label().equals("exec")).findFirst().orElseThrow().id();
+        GraphMutationRequest connectRequest = new GraphMutationRequest(EditorGraphProjection.VERSION,
+                "npcs/caller.yml", "npc", "caller", "", caller, sha(caller), result.rawFiles(),
+                List.of(op(GraphMutationOperation.Type.CONNECT, null, null, null,
+                        eventExec, callExec, null, "start-call", null, null)));
+        GraphMutationResponse connected = mutations.mutate(connectRequest);
+        assertTrue(connected.content().contains("start-call:")
+                && connected.content().contains("$event.exec")
+                && connected.content().contains("call.exec"));
     }
 
     @Test void reorderNeverTrustsAnArrayIndexWithoutStableParentAndNeighborPorts() {
@@ -565,6 +638,25 @@ class GraphMutationServiceTest {
                         null, null, "/root/children", null, null, "extension-action", "unsigned",
                         "vendor:unknown", 0)))));
         assertEquals("UNSIGNED_EXTENSION_SCHEMA", unsigned.code());
+    }
+
+    @Test void connectingExecutionOutputAtomicallyReplacesItsPreviousWire() {
+        String source = "content-version: 2\nid: demo:talk\nstart: first\nnodes:\n  first:\n    graph:\n"
+                + "      variables: {}\n      nodes:\n        line: { type: say, text: Hi }\n"
+                + "        second: { type: end-dialogue }\n        third: { type: end-dialogue }\n"
+                + "      connections:\n        enter: { from: $event.exec, to: line.exec }\n"
+                + "        finish: { from: line.success, to: second.exec }\n";
+        EditorGraphProjection graph = projections.project(projectionRequest("dialogue", "demo:talk", source));
+        var line = graph.nodes().stream().filter(node -> node.title().equals("line")).findFirst().orElseThrow();
+        var third = graph.nodes().stream().filter(node -> node.title().equals("third")).findFirst().orElseThrow();
+        String output = line.pins().stream().filter(pin -> pin.label().equals("success")).findFirst().orElseThrow().id();
+        String input = third.pins().stream().filter(pin -> pin.label().equals("exec")).findFirst().orElseThrow().id();
+        GraphMutationResponse result = mutate("dialogue", "demo:talk", source,
+                op(GraphMutationOperation.Type.CONNECT, null, null, null, output, input,
+                        null, "replacement", null, null));
+        assertFalse(result.content().contains("finish:"));
+        assertTrue(result.content().contains("replacement:") && result.content().contains("to: third.exec"));
+        assertEquals(1, result.projection().edges().stream().filter(edge -> edge.sourcePinId().equals(output)).count());
     }
 
     private static void assertGolden(GraphMutationResponse result, String label) {

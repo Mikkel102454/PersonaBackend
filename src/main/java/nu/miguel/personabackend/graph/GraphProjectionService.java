@@ -555,7 +555,7 @@ public final class GraphProjectionService {
             String graphPath = descriptor == null ? absentPath : descriptor.path();
             String prefix = request.resourceKind() + ":" + request.resourceId() + "#graph:"
                     + sha256(graphPath).substring(0, 10);
-            Map<String, GraphPin> endpointPins = new LinkedHashMap<>();
+            Map<String, List<GraphPin>> endpointPins = new LinkedHashMap<>();
             if (reusable) {
                 if (descriptor == null || !"mapping".equals(descriptor.kind()) || child(descriptor, "inputs") == null
                         || child(descriptor, "outputs") == null || child(descriptor, "variables") == null
@@ -569,14 +569,14 @@ public final class GraphProjectionService {
                         "exec", descriptor.path(), 0, null, null);
                 GraphPin leave = typedPin(outputId, "input", "EXECUTION", "execution", true,
                         "exec", descriptor.path(), 0, null, null);
-                inputs.add(enter); outputs.add(leave); endpointPins.put("$input.exec", enter); endpointPins.put("$output.exec", leave);
+                inputs.add(enter); outputs.add(leave); registerEndpoint(endpointPins, "$input.exec", enter); registerEndpoint(endpointPins, "$output.exec", leave);
                 int order = 1;
                 for (YamlDocumentNode parameter : child(descriptor, "inputs").children()) {
                     String type = scriptValueType(value(parameter, "type", "string"), parameter);
                     GraphPin pin = typedPin(inputId, "output", "DATA", type,
                             Boolean.parseBoolean(value(parameter, "required", "false")), parameter.key(), parameter.path(),
                             order++, childValue(parameter, "default"), childValue(parameter, "default"));
-                    inputs.add(pin); endpointPins.put("$input." + parameter.key(), pin);
+                    inputs.add(pin); registerEndpoint(endpointPins, "$input." + parameter.key(), pin);
                 }
                 order = 1;
                 for (YamlDocumentNode parameter : child(descriptor, "outputs").children()) {
@@ -584,7 +584,7 @@ public final class GraphProjectionService {
                     GraphPin pin = typedPin(outputId, "input", "DATA", type,
                             Boolean.parseBoolean(value(parameter, "required", "false")), parameter.key(), parameter.path(),
                             order++, childValue(parameter, "default"), childValue(parameter, "default"));
-                    outputs.add(pin); endpointPins.put("$output." + parameter.key(), pin);
+                    outputs.add(pin); registerEndpoint(endpointPins, "$output." + parameter.key(), pin);
                 }
                 directNode(inputId, child(descriptor, "inputs"), "script-input", "Input", graphTitle,
                         inputs, List.of("boundary", "permanent", "non-deletable"));
@@ -595,12 +595,12 @@ public final class GraphProjectionService {
                 List<GraphPin> pins = new ArrayList<>();
                 GraphPin exec = typedPin(eventId, "output", "EXECUTION", "execution", false,
                         "exec", graphPath, 0, null, null);
-                pins.add(exec); endpointPins.put("$event.exec", exec);
+                pins.add(exec); registerEndpoint(endpointPins, "$event.exec", exec);
                 int order = 1;
                 for (var entry : eventPins.entrySet()) {
                     GraphPin pin = typedPin(eventId, "output", "DATA", scriptValueType(entry.getValue(),
                             descriptor == null ? documentRoot : descriptor), false, entry.getKey(), graphPath, order++, null, null);
-                    pins.add(pin); endpointPins.put("$event." + entry.getKey(), pin);
+                    pins.add(pin); registerEndpoint(endpointPins, "$event." + entry.getKey(), pin);
                 }
                 directNode(eventId, descriptor == null ? documentRoot : descriptor, "event", graphTitle,
                         descriptor == null ? "Connect execution to create this graph" : "Host event", pins,
@@ -625,9 +625,11 @@ public final class GraphProjectionService {
                     appendFields(variablesId, variables.children().stream().map(variable -> {
                         String type = value(variable, "type", "string");
                         String defaultValue = childValue(variable, "default");
+                        YamlDocumentNode defaultNode = child(variable, "default");
                         return new GraphField(variablesId + ":field:" + pinToken(variable.key()), variable.key(),
-                                variable.path(), range(variable), "variable", defaultValue == null ? type : type + " = " + defaultValue,
-                                true, false, false);
+                                defaultNode == null ? variable.path() + "/type" : defaultNode.path(),
+                                defaultNode == null ? range(variable) : range(defaultNode), type,
+                                defaultValue == null ? type : defaultValue, defaultNode != null, false, false);
                     }).toList());
                 }
             }
@@ -645,15 +647,18 @@ public final class GraphProjectionService {
                         &&pin.resourceKind()!=null&&pin.literal()!=null&&pin.literal().value()!=null)resourceValueBinding(pin);
             }
 
-            Set<String> targets = new HashSet<>();
+            Set<String> targets = new HashSet<>(), executionSources = new HashSet<>();
             for (YamlDocumentNode connection : child(descriptor, "connections").children()) {
                 String from = value(connection, "from", ""), to = value(connection, "to", "");
-                GraphPin source = endpointPins.get(from), target = endpointPins.get(to);
+                GraphPin source = endpoint(endpointPins, from, "OUTPUT"), target = endpoint(endpointPins, to, "INPUT");
                 if (source == null || target == null)
                     throw error(HttpStatus.UNPROCESSABLE_ENTITY, "MISSING_PIN_ENDPOINT",
                             "Connection " + connection.key() + " references a missing pin", request.path(), connection.path());
                 if (!targets.add(target.id())) throw error(HttpStatus.UNPROCESSABLE_ENTITY, "CARDINALITY_EXCEEDED",
                         "Graph inputs accept only one connection", request.path(), connection.path());
+                if ("EXECUTION".equals(source.channel()) && !executionSources.add(source.id()))
+                    throw error(HttpStatus.UNPROCESSABLE_ENTITY, "CARDINALITY_EXCEEDED",
+                            "Graph execution outputs accept at most one connection", request.path(), connection.path());
                 if (!source.channel().equals(target.channel()) || source.channel().equals("DATA")
                         && !source.valueType().equals(target.valueType()))
                     throw error(HttpStatus.UNPROCESSABLE_ENTITY, "INCOMPATIBLE_PIN_TYPES",
@@ -665,9 +670,9 @@ public final class GraphProjectionService {
         }
 
         private List<GraphPin> graphNodePins(YamlDocumentNode definition, String nodeId, String nodeKey, String type,
-                                             Map<String, String> variableTypes, Map<String, GraphPin> endpoints) {
+                                             Map<String, String> variableTypes, Map<String, List<GraphPin>> endpoints) {
             List<GraphPin> pins = new ArrayList<>();
-            java.util.function.Consumer<GraphPin> add = pin -> { pins.add(pin); endpoints.put(nodeKey + "." + pin.label(), pin); };
+            java.util.function.Consumer<GraphPin> add = pin -> { pins.add(pin); registerEndpoint(endpoints, nodeKey + "." + pin.label(), pin); };
             if (type.equals("value")) {
                 add.accept(typedPin(nodeId, "output", "DATA", scriptValueType(value(definition, "value-type", "string"), definition),
                         false, "value", definition.path() + "/value", 0, childValue(definition, "value"), null));
@@ -695,6 +700,21 @@ public final class GraphProjectionService {
                         childValue(definition, "value"), null));
                 add.accept(typedPin(nodeId, "output", "DATA", target, false, "result", definition.path(), 0, null, null));
                 return pins;
+            }
+            if (Set.of("equals", "not-equals", "greater-than", "greater-than-or-equal", "less-than", "less-than-or-equal").contains(type)) {
+                String operand = scriptValueType(value(definition, "value-type", "string"), definition);
+                add.accept(typedPin(nodeId, "input", "DATA", operand, true, "left", definition.path() + "/left", 0, childValue(definition, "left"), null));
+                add.accept(typedPin(nodeId, "input", "DATA", operand, true, "right", definition.path() + "/right", 1, childValue(definition, "right"), null));
+                add.accept(typedPin(nodeId, "output", "DATA", "boolean", false, "result", definition.path(), 2, null, null)); return pins;
+            }
+            if (Set.of("and", "or").contains(type)) {
+                add.accept(typedPin(nodeId, "input", "DATA", "boolean", true, "left", definition.path() + "/left", 0, childValue(definition, "left"), null));
+                add.accept(typedPin(nodeId, "input", "DATA", "boolean", true, "right", definition.path() + "/right", 1, childValue(definition, "right"), null));
+                add.accept(typedPin(nodeId, "output", "DATA", "boolean", false, "result", definition.path(), 2, null, null)); return pins;
+            }
+            if (type.equals("not")) {
+                add.accept(typedPin(nodeId, "input", "DATA", "boolean", true, "value", definition.path() + "/value", 0, childValue(definition, "value"), null));
+                add.accept(typedPin(nodeId, "output", "DATA", "boolean", false, "result", definition.path(), 1, null, null)); return pins;
             }
 
             if (type.equals("gate")) for (String name : List.of("enter", "open", "close", "toggle"))
@@ -749,10 +769,16 @@ public final class GraphProjectionService {
                         add.accept(typedPin(nodeId, "output", "DATA", scriptValueType(value(parameter, "type", "string"), parameter),
                                 false, parameter.key(), definition.path(), pins.size(), null, null));
                 }
-            } else if (type.contains(":") && signed("command", type)) extensionCommandPins(definition, nodeId, nodeKey, type, pins, endpoints);
+            } else if (type.contains(":") && signed("command", type)) {
+                int firstExtensionPin = pins.size();
+                extensionCommandPins(definition, nodeId, nodeKey, type, pins, new LinkedHashMap<>());
+                for (int index = firstExtensionPin; index < pins.size(); index++)
+                    registerEndpoint(endpoints, nodeKey + "." + pins.get(index).label(), pins.get(index));
+            }
             else for (String field : scriptCommandFields(type)) requiredData.putIfAbsent(field, scriptFieldType(type, field));
             for (var entry : requiredData.entrySet()) {
-                if (pins.stream().anyMatch(pin -> pin.label().equals(entry.getKey()))) continue;
+                if (pins.stream().anyMatch(pin -> pin.label().equals(entry.getKey())
+                        && pin.direction().equals("INPUT") && pin.channel().equals("DATA"))) continue;
                 YamlDocumentNode inputContainer = type.equals("run-script") ? child(definition, "inputs") : definition;
                 YamlDocumentNode literal = child(inputContainer, entry.getKey());
                 add.accept(typedPin(nodeId, "input", "DATA", entry.getValue(), requiredScriptField(type, entry.getKey()), entry.getKey(),
@@ -767,6 +793,15 @@ public final class GraphProjectionService {
             }
             if (type.equals("set-variable")) add.accept(typedPin(nodeId, "output", "DATA", requiredData.get("value"), false, "result", definition.path(), pins.size(), null, null));
             return pins;
+        }
+
+        private static void registerEndpoint(Map<String, List<GraphPin>> endpoints, String name, GraphPin pin) {
+            endpoints.computeIfAbsent(name, ignored -> new ArrayList<>()).add(pin);
+        }
+
+        private static GraphPin endpoint(Map<String, List<GraphPin>> endpoints, String name, String direction) {
+            return endpoints.getOrDefault(name, List.of()).stream()
+                    .filter(pin -> direction.equals(pin.direction())).findFirst().orElse(null);
         }
 
         private YamlDocumentNode reusableDescriptor(String id) {
@@ -786,6 +821,8 @@ public final class GraphProjectionService {
         private void directNode(String id, YamlDocumentNode source, String kind, String title, String subtitle,
                                 List<GraphPin> pins, List<String> badges, String yamlPath) {
             if (nodes.stream().anyMatch(node -> node.id().equals(id))) return;
+            if (nodes.size() >= MAX_NODES) throw error(HttpStatus.PAYLOAD_TOO_LARGE, "GRAPH_NODE_LIMIT",
+                    "Graph exceeds 10000 nodes", request.path(), source.path());
             GraphNode node = new GraphNode(id, yamlPath, range(source), kind, title, subtitle,
                     source.path().equals(yamlPath) ? fields(source, false) : List.of(), pins, badges, false, null);
             nodes.add(node); nodeIndexById.put(id, nodes.size() - 1); nodeByPath.putIfAbsent(yamlPath, id);
@@ -803,7 +840,8 @@ public final class GraphProjectionService {
         private static boolean pureGraphNode(String type) {
             return type.equals("value") || type.equals("get-variable") || type.startsWith("get-player-")
                     || type.startsWith("get-global-npc-memory") || type.startsWith("get-player-npc-memory")
-                    || Set.of("integer-to-number", "string-to-text", "to-string").contains(type);
+                    || Set.of("integer-to-number", "string-to-text", "to-string", "equals", "not-equals",
+                    "greater-than", "greater-than-or-equal", "less-than", "less-than-or-equal", "and", "or", "not").contains(type);
         }
 
         private static boolean flowGraphNode(String type) {
@@ -966,7 +1004,8 @@ public final class GraphProjectionService {
                 case "dialogue" -> DIALOGUE_ROOT;
                 case "quest" -> QUEST_ROOT;
                 case "npc" -> NPC_ROOT;
-                case "script" -> Set.of();
+                case "script" -> Set.of("content-version", "id", "inputs", "outputs", "variables", "nodes",
+                        "connections", "tags");
                 default -> Set.of();
             };
             if ("mapping".equals(root.kind())) for (YamlDocumentNode child : root.children())

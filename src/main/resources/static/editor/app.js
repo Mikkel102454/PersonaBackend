@@ -3,7 +3,8 @@ import { PanelLayout } from './modules/layout-store.js';
 import { GraphLayoutStore } from './modules/graph-layout.js';
 import { GraphCanvas } from './modules/graph-canvas.js';
 import { GraphInspector } from './modules/graph-inspector.js';
-import { GraphMutationClient, contractMessage, inlineDefaultOperation } from './modules/graph-mutations.js';
+import { GraphMutationClient, contractMessage, inlineDefaultOperation, resourceDropCreateOperation,
+  defaultResourceDropOwner } from './modules/graph-mutations.js';
 import { CommandDispatcher } from './modules/command-dispatcher.js';
 import { nodeDefinitions, compatibleDefinitions, matchingDefinitionInput, automaticNodeId, yamlMappingKeys } from './modules/node-registry.js';
 import { createWorkspaceState } from './modules/workspace-state.js';
@@ -15,6 +16,8 @@ import { publicationReady, validationHeading, diagnosticLabel } from './modules/
 import { revealSource } from './modules/source-selection.js';
 import { BottomDock } from './modules/bottom-dock.js';
 import { hasGraphCapability } from './modules/capabilities.js';
+import { requestConfirm, requestText } from './modules/action-form.js';
+import { invalidateAffectedProjections } from './modules/projection-cache.js';
 
 const sessionId = location.pathname.match(/^\/editor\/session\/([0-9a-f-]+)$/i)?.[1];
 if (!sessionId) throw new Error('The Persona editor requires a server-created session URL.');
@@ -168,14 +171,14 @@ const graphCanvas = new GraphCanvas({
   ], `Set ${pin.label} value`),
   onResourceDrop: async (resource,position,targetPin) => { const key=`value-${crypto.randomUUID().replaceAll('-','').slice(0,8)}`;
     const owner=targetPin?graphNodeByPin(targetPin):(graphCanvas.projection?.nodes||[]).find(node=>graphCanvas.selection.has(node.id))
-      ||(graphCanvas.projection?.nodes||[]).find(node=>['event','script-input'].includes(node.kind));
+      ||defaultResourceDropOwner(graphCanvas.projection?.nodes,graphCanvas.projection?.resourceKind);
     const descriptor=explicitGraphPath(owner,graphCanvas.projection);
     if(descriptor==null){yamlStatus.textContent='Select an event or reusable graph before dropping a resource.';return;}
     const parentYamlPath=`${descriptor}/nodes`.replace(/^\/\//,'/');
-    const create={ type:'CREATE_VALUE_NODE',parentYamlPath,key,value:resource.id,valueType:resource.kind }, operations=targetPin
+    const create=resourceDropCreateOperation(resource,parentYamlPath,key), connectTarget=resource.kind==='script'?null:targetPin, operations=connectTarget
       ? [{type:'COMPOUND',operationId:crypto.randomUUID(),children:[create,{type:'CONNECT',key:`wire-${crypto.randomUUID().replaceAll('-','').slice(0,12)}`,sourcePinId:`${graphCanvas.projection.resourceKind}:${graphCanvas.projection.resourceId}#graph:${hex(await crypto.subtle.digest('SHA-256',encoder.encode(descriptor))).slice(0,10)}:node:${key}:output:value`,targetPinId:targetPin.id}]}]
       : [create];
-    const result=await graphMutationClient.mutate(operations,`${targetPin?'Connect':'Add'} ${resource.id}`);
+    const result=await graphMutationClient.mutate(operations,`${connectTarget?'Connect':'Add'} ${resource.id}`);
     placeCreatedGraphNode(result,key,position); },
   onDisconnect: edge => commandDispatcher.execute('graph.disconnect', edge),
   onBreakLinks: (edges, pin) => graphMutationClient.mutate([
@@ -304,15 +307,15 @@ commandDispatcher
     run: () => graphCanvas.tidySelection() })
   .register('graph.auto-layout', { label: 'Auto-layout graph', enabled: () => Boolean(graphCanvas.projection),
     run: () => graphCanvas.autoLayout() })
-  .register('graph.comment', { label: 'Add graph comment', enabled: () => Boolean(graphCanvas.projection), run: () => {
-    const text = prompt('Graph comment (stored only in browser layout metadata)'); if (text) graphCanvas.addComment(text);
+  .register('graph.comment', { label: 'Add graph comment', enabled: () => Boolean(graphCanvas.projection), run: async () => {
+    const text = await requestText('Graph comment (stored only in browser layout metadata)'); if (text) graphCanvas.addComment(text);
   } })
-  .register('graph.group', { label: 'Group selected nodes', enabled: () => graphCanvas.selection.size >= 2, run: () => {
-    const label = prompt('Group label (stored only in browser layout metadata)', 'Group');
+  .register('graph.group', { label: 'Group selected nodes', enabled: () => graphCanvas.selection.size >= 2, run: async () => {
+    const label = await requestText('Group label (stored only in browser layout metadata)', 'Group');
     if (label) graphCanvas.groupSelection(label);
   } })
-  .register('graph.color', { label: 'Color-label selected nodes', enabled: () => graphCanvas.selection.size > 0, run: () => {
-    const color = prompt('Six-digit CSS color for the selected nodes', '#5d77a8');
+  .register('graph.color', { label: 'Color-label selected nodes', enabled: () => graphCanvas.selection.size > 0, run: async () => {
+    const color = await requestText('Six-digit CSS color for the selected nodes', '#5d77a8');
     if (color) graphCanvas.colorSelection(color);
   } })
   .register('graph.focus-upstream', { label: 'Focus upstream nodes', enabled: () => graphCanvas.selection.size > 0,
@@ -616,7 +619,7 @@ function renderVisualNode(node) {
   const heading = document.createElement('span'); heading.append(label, document.createElement('br'), kind);
   if(node.kind==='mapping'){const fields=new Map((node.children||[]).filter(child=>child.key!=null).map(child=>[child.key,child.value])),type=fields.get('type'),id=fields.get('id');if(type){const badge=document.createElement('small');badge.className='node-semantic';let detail=type;if(parent?.kind==='sequence')detail+=` · order ${Number(node.key?.match(/\d+/)?.[0]||0)+1}`;if(type==='priority-selector')detail+=' · first success wins';if(type==='parallel')detail+=` · success ${fields.get('success-threshold')||'all'} · failure ${fields.get('failure-threshold')||'1'}`;if(type==='checkpoint')detail+=' · durable boundary';badge.textContent=detail;heading.append(document.createElement('br'),badge);container.classList.add(`node-type-${type}`);}if(id&&state.duplicateNodeIds?.has(id)){container.classList.add('node-error');const warning=document.createElement('small');warning.className='scope-warning';warning.textContent=`Duplicate stable node ID: ${id}`;heading.append(document.createElement('br'),warning);}const rootScope=state.documentModels.get(state.selected)?.root?.children?.find(child=>child.key==='scope')?.value;if(editorKind()==='behavior'&&rootScope==='shared'){const action=fields.get('action'),condition=fields.get('condition'),memoryScope=fields.get('scope');if(['command','script','set-anchor','set-visible','private-navigate','begin-private-presentation'].includes(action)||['quest-state','item-count','flag','variable','permission','world'].includes(condition)||memoryScope==='player'){container.classList.add('node-error');const warning=document.createElement('small');warning.className='scope-warning';warning.textContent='Player-only node is not valid in a shared behavior';heading.append(document.createElement('br'),warning);}}if(type==='subtree'&&fields.get('subtree')){const jump=document.createElement('button');jump.type='button';jump.className='subtree-jump';jump.textContent=`Open ${fields.get('subtree')}`;jump.addEventListener('click',event=>{event.stopPropagation();openBehavior(fields.get('subtree'));});heading.append(document.createElement('br'),jump);}}
   row.append(heading);
-  if(orderedItem){const actions=document.createElement('span');actions.className='node-actions';const duplicate=document.createElement('button');duplicate.type='button';duplicate.textContent='Duplicate';duplicate.title='Duplicate this complete branch with a new stable ID';duplicate.addEventListener('click',event=>{event.stopPropagation();applyStructure('DUPLICATE_AFTER',node.path,null);});actions.append(duplicate);if(editorKind()==='behavior'&&node.kind==='mapping'){const extract=document.createElement('button');extract.type='button';extract.textContent='Extract subtree';extract.addEventListener('click',event=>{event.stopPropagation();extractSubtree(node.path);});actions.append(extract);}const remove=document.createElement('button');remove.type='button';remove.textContent='Delete';remove.addEventListener('click',event=>{event.stopPropagation();if(confirm(`Delete ${nodeLabel(node)} and its complete branch?`))applyStructure('DELETE',node.path,null);});actions.append(remove);heading.append(actions);}
+  if(orderedItem){const actions=document.createElement('span');actions.className='node-actions';const duplicate=document.createElement('button');duplicate.type='button';duplicate.textContent='Duplicate';duplicate.title='Duplicate this complete branch with a new stable ID';duplicate.addEventListener('click',event=>{event.stopPropagation();applyStructure('DUPLICATE_AFTER',node.path,null);});actions.append(duplicate);if(editorKind()==='behavior'&&node.kind==='mapping'){const extract=document.createElement('button');extract.type='button';extract.textContent='Extract subtree';extract.addEventListener('click',event=>{event.stopPropagation();extractSubtree(node.path);});actions.append(extract);}const remove=document.createElement('button');remove.type='button';remove.textContent='Delete';remove.addEventListener('click',async event=>{event.stopPropagation();if(await requestConfirm(`Delete ${nodeLabel(node)} and its complete branch?`,'Delete'))applyStructure('DELETE',node.path,null);});actions.append(remove);heading.append(actions);}
   const original = state.originalModels.get(state.selected);
   const originalNode = original ? findModelNode(original.root, node.path) : null;
   if (originalNode && (originalNode.kind !== node.kind || originalNode.value !== node.value)) row.classList.add('changed');
@@ -670,7 +673,7 @@ function renderDialogueInsights(value){const nodes=value.nodes||{},edges=dialogu
 function renderQuestInsights(value){const phases=value.phases||[],ids=new Set(phases.map(phase=>phase.id)),reachable=new Set();const visit=id=>{if(!id||id==='end'||reachable.has(id)||!ids.has(id))return;reachable.add(id);const index=phases.findIndex(phase=>phase.id===id),phase=phases[index];for(const branch of phase.branches||[])visit(branch['next-phase']);if(index+1<phases.length)visit(phases[index+1].id);};visit(phases[0]?.id);phases.forEach((phase,index)=>{const destinations=(phase.branches||[]).map(branch=>branch['next-phase']).filter(Boolean),invalid=destinations.some(id=>id!=='end'&&!ids.has(id)),impossible=(phase.branches||[]).some(branch=>branch.when?.type==='chance'&&Number(branch.when.chance)<=0),unreachable=!reachable.has(phase.id);visualGraph.append(graphCard(`${phase.id||'?'} → ${destinations.join(', ')||phases[index+1]?.id||'end'} · ${(phase.objectives||[]).length} objectives${impossible?' · impossible branch':''}${unreachable?' · unreachable':''}`,invalid||impossible||unreachable));});const objectives=phases.flatMap(phase=>(phase.objectives||[]).map(objective=>`${phase.id}/${objective.id}: ${objective.type}, ${objective.optional?'optional':'required'}, ${objective.hidden?'hidden':'visible'}, target ${objective.amount||objective.duration||1}`));visualPreview.textContent=`Requirements: ${JSON.stringify(value.when||value.requirements||'none')}\nTimer: ${value['time-limit']||'none'} · repeatable: ${value.repeatable||false} · cooldown: ${value.cooldown||'none'} · maximum completions: ${value['maximum-completions']||'unlimited'}\n${objectives.join('\n')}\nPlaceholders: <player>, <quest>, <phase>, <objective>, <current>, <required>, <memory:key>`;}
 function renderNpcInsights(value){const definition=value.id,live=[...state.liveData.npcs.values()].filter(npc=>npc.definitionId===definition),anchors=Object.entries(value.anchors||{}),table=document.createElement('table');table.className='anchor-table';table.innerHTML='<tr><th>Anchor</th><th>World / coordinates</th><th></th></tr>';for(const [name,anchor] of anchors){const actor=live.find(npc=>!npc.playerId),far=actor?.position&&actor.position.world===anchor.world?Math.hypot(actor.position.x-anchor.x,actor.position.y-anchor.y,actor.position.z-anchor.z)>48:false,row=document.createElement('tr'),label=document.createElement('td'),position=document.createElement('td'),action=document.createElement('td'),button=document.createElement('button');label.textContent=name+(far?' ⚠ far from actor':'');position.textContent=`${anchor.world} ${anchor.x} ${anchor.y} ${anchor.z} ${anchor.yaw||0} ${anchor.pitch||0}`;button.type='button';button.textContent='Paste coordinates';button.addEventListener('click',()=>importAnchor(name));action.append(button);row.append(label,position,action);table.append(row);}visualGraph.append(table);if(anchors.length){const map=document.createElement('div');map.className='anchor-map';const xs=anchors.map(([,a])=>Number(a.x)),zs=anchors.map(([,a])=>Number(a.z)),minX=Math.min(...xs),maxX=Math.max(...xs),minZ=Math.min(...zs),maxZ=Math.max(...zs);for(const [name,anchor] of anchors){const point=document.createElement('span');point.className='anchor-point';point.style.left=`${5+90*(Number(anchor.x)-minX)/(maxX-minX||1)}%`;point.style.top=`${5+90*(Number(anchor.z)-minZ)/(maxZ-minZ||1)}%`;point.textContent=name;point.title=`${anchor.world}: ${anchor.x}, ${anchor.y}, ${anchor.z}`;map.append(point);}visualGraph.append(map);}const presentations=live.map(npc=>`${npc.playerId||'shared'}: ${npc.presentation}/${npc.projectionState}, ${npc.entityName||value['display-name']||''} ${npc.entityType||''}, skin ${npc.skin||'none'}, equipment ${JSON.stringify(npc.equipment||{})}, age ${npc.age??'n/a'}, pose ${npc.pose||'n/a'}`);visualPreview.textContent=`Definition ${definition||'?'} · display ${value['display-name']||''}\nshared behavior ${value['shared-behavior']||'none'} · player behavior ${value['player-behavior']||'none'}\n${presentations.join('\n')||'Open a trusted live subscription to preview shared/private Citizens presentation.'}`;}
 function renderScriptInsights(value){for(const [id,node] of Object.entries(value.nodes||{}))visualGraph.append(graphCard(`${id} · ${node.type||'unknown'}`));visualPreview.textContent=`${Object.keys(value.inputs||{}).length} inputs · ${Object.keys(value.outputs||{}).length} outputs · ${Object.keys(value.variables||{}).length} local variables · ${Object.keys(value.connections||{}).length} explicit wires.`;}
-async function importAnchor(name){const raw=prompt('Paste “x y z [yaw pitch]” or a Minecraft /tp command');if(!raw)return;const numbers=raw.match(/-?\d+(?:\.\d+)?/g)?.map(Number);if(!numbers||numbers.length<3){yamlStatus.textContent='Could not find at least x, y, and z coordinates.';return;}const values=numbers.slice(-5),xyz=values.length>=5?values:values.slice(0,3);for(const [field,value] of [['x',xyz[0]],['y',xyz[1]],['z',xyz[2]],['yaw',values.length>=5?values[3]:0],['pitch',values.length>=5?values[4]:0]])await applyVisualEdit(`/anchors/${name.replaceAll('~','~0').replaceAll('/','~1')}/${field}`,String(value));}
+async function importAnchor(name){const raw=await requestText('Paste “x y z [yaw pitch]” or a Minecraft /tp command');if(!raw)return;const numbers=raw.match(/-?\d+(?:\.\d+)?/g)?.map(Number);if(!numbers||numbers.length<3){yamlStatus.textContent='Could not find at least x, y, and z coordinates.';return;}const values=numbers.slice(-5),xyz=values.length>=5?values:values.slice(0,3);for(const [field,value] of [['x',xyz[0]],['y',xyz[1]],['z',xyz[2]],['yaw',values.length>=5?values[3]:0],['pitch',values.length>=5?values[4]:0]])await applyVisualEdit(`/anchors/${name.replaceAll('~','~0').replaceAll('/','~1')}/${field}`,String(value));}
 function runSimulation(input, output) { try { const mocks=JSON.parse(input.value),model=state.documentModels.get(state.selected),value=modelValue(model.root);output.textContent=JSON.stringify(simulate(editorKind(),value,mocks),null,2); } catch(error) { output.textContent=`Simulation input error: ${error.message}`; } }
 document.querySelector('#simulate-open').addEventListener('click',()=>showOutput('simulation'));document.querySelector('#simulation-close').addEventListener('click',()=>simulationDialog.close());document.querySelector('#simulation-run').addEventListener('click',()=>runSimulation(simulationInput,simulationOutput));
 document.querySelector('#simulation-dock-run').addEventListener('click',()=>runSimulation(document.querySelector('#simulation-dock-input'),document.querySelector('#simulation-dock-output')));
@@ -788,6 +791,7 @@ async function applyGraphMutationResult(result, { label, context }) {
   }
   state.documentModels.set(context.selected, result.document);
   state.documentValidity.set(context.selected, true);
+  invalidateAffectedProjections(state.graphProjections, result.affectedResourceIds, context.resource.identity);
   state.graphProjections.set(context.resource.identity, result.projection);
   yamlStatus.textContent = `${label} applied as ${result.appliedOperationCount} authoritative operation${result.appliedOperationCount === 1 ? '' : 's'}; unrelated YAML was retained.`;
   appendGraphHistory(label, 'accepted', result.projectRevision || result.contentDigest);
@@ -809,13 +813,13 @@ function appendGraphHistory(label, kind, revision = null) {
   list.prepend(item); while (list.children.length > 100) list.lastElementChild.remove();
 }
 
-function deleteGraphNodes(nodeIds) {
+async function deleteGraphNodes(nodeIds) {
   if (!state.connected || graphMutationClient?.inFlight) return;
   const selected = (graphCanvas.projection?.nodes || [])
     .filter(node => nodeIds.includes(node.id) && node.yamlPath && !node.custom)
     .sort((left, right) => right.range.startOffset - left.range.startOffset);
   if (!selected.length) { yamlStatus.textContent = 'No selected graph node can be safely deleted visually.'; return; }
-  if (!confirm(`Delete ${selected.length} selected node${selected.length === 1 ? '' : 's'} and their complete YAML branches?`)) return;
+  if (!await requestConfirm(`Delete ${selected.length} selected node${selected.length === 1 ? '' : 's'} and their complete YAML branches?`, 'Delete')) return;
   graphMutationClient.mutate(selected.map(node => ({ type: 'DELETE', yamlPath: node.yamlPath })), 'Delete graph selection');
 }
 
@@ -891,26 +895,26 @@ async function pasteGraphNode() {
 
 async function duplicateGraphNodes(nodeIds) { if (copyGraphNode(nodeIds)) await pasteGraphNode(); }
 
-function renameGraphNode(nodeId) {
+async function renameGraphNode(nodeId) {
   const node=(graphCanvas.projection?.nodes||[]).find(value=>value.id===nodeId);
   if(!node?.yamlPath?.includes('/nodes/')||(node.badges||[]).includes('non-deletable'))return;
-  const newName=prompt('New stable node ID',node.title)?.trim();if(!newName||newName===node.title)return;
+  const newName=(await requestText('New stable node ID',node.title))?.trim();if(!newName||newName===node.title)return;
   graphMutationClient.mutate([{type:'RENAME_NODE',operationId:crypto.randomUUID(),yamlPath:node.yamlPath,newName}],`Rename ${node.title}`);
 }
 
-function moveAllPinLinks(pin) {
+async function moveAllPinLinks(pin) {
   const candidates=(graphCanvas.projection?.nodes||[]).flatMap(node=>(node.pins||[]).map(value=>({node,pin:value})))
     .filter(entry=>entry.pin.id!==pin.id&&entry.pin.direction===pin.direction&&entry.pin.channel===pin.channel
       &&entry.pin.valueType===pin.valueType).slice(0,50);
   if(!candidates.length){yamlStatus.textContent='No compatible destination pin exists in this graph.';return;}
   const labels=candidates.map((entry,index)=>`${index+1}. ${entry.node.title} · ${entry.pin.label}`);
-  const choice=prompt(`Move all links to which compatible pin?\n${labels.join('\n')}`,'1')?.trim();if(!choice)return;
+  const choice=(await requestText(`Move all links to which compatible pin?\n${labels.join('\n')}`,'1'))?.trim();if(!choice)return;
   const selected=/^\d+$/.test(choice)?candidates[Number(choice)-1]:candidates.find(entry=>entry.pin.id===choice);
   if(!selected){yamlStatus.textContent='Choose one of the numbered compatible pins.';return;}
   graphMutationClient.mutate([{type:'MOVE_LINKS',sourcePinId:pin.id,targetPinId:selected.pin.id}],`Move links to ${selected.pin.label}`);
 }
 
-function handleGraphNodeAction({ type, node }) {
+async function handleGraphNodeAction({ type, node }) {
   if (type === 'DUPLICATE_NODE') {
     if(node.yamlPath.includes('/nodes/')){duplicateGraphNodes([node.id]);return;}
     graphMutationClient.mutate([{ type: 'DUPLICATE', operationId: crypto.randomUUID(), yamlPath: node.yamlPath }], 'Duplicate graph node'); return;
@@ -927,7 +931,7 @@ function handleGraphNodeAction({ type, node }) {
     return;
   }
   if (type === 'WRAP_NODE') {
-    const nodeKind = prompt('Wrapper type: sequence, selector, priority-selector, parallel, invert, repeat, retry, timeout, cooldown, or checkpoint', 'sequence')?.trim();
+    const nodeKind = (await requestText('Wrapper type: sequence, selector, priority-selector, parallel, invert, repeat, retry, timeout, cooldown, or checkpoint', 'sequence'))?.trim();
     if (!nodeKind) return;
     const key = automaticNodeId({ label: `${nodeKind}-wrapper` }, graphCanvas.projection?.nodes);
     graphMutationClient.mutate([{ type: 'WRAP', operationId: crypto.randomUUID(), yamlPath: node.yamlPath, nodeKind, key }], 'Wrap graph node'); return;
@@ -939,9 +943,9 @@ function handleGraphNodeAction({ type, node }) {
     graphMutationClient.mutate([{ type: 'EDIT_FIELD', yamlPath: '/start', value: node.title }], 'Set dialogue start');
     return;
   }
-  if(type==='ADD_SCRIPT_PARAMETER'){if(graphCanvas.projection?.resourceKind!=='script'||!['script-input','script-output'].includes(node.kind))return;const name=prompt('Parameter name','value')?.trim();if(!name)return;const valueType=prompt('Nominal type (for example integer, text, quest)','string')?.trim();if(!valueType)return;const required=confirm('Require callers to provide this parameter?');const defaultValue=required?null:prompt('Inline default (leave blank for none)','');graphMutationClient.mutate([{type:'ADD_SCRIPT_PARAMETER',parentYamlPath:`${graphCanvas.projection.rootYamlPath}/${node.kind==='script-input'?'inputs':'outputs'}`,key:name,valueType,required,defaultValue:defaultValue||null}],`Add ${name} parameter`);return;}
-  if(['RENAME_VARIABLE','CHANGE_VARIABLE_TYPE','DELETE_VARIABLE'].includes(type)){const variable=node.fields?.find(field=>field.label==='variable')?.value;if(!variable){yamlStatus.textContent='This node does not identify an execution-local variable.';return;}const descriptor=explicitGraphPath(node,graphCanvas.projection);if(type==='RENAME_VARIABLE'){const newName=prompt('New variable name',variable)?.trim();if(newName&&newName!==variable)graphMutationClient.mutate([{type,parentYamlPath:descriptor,parameterName:variable,newName}],`Rename ${variable}`);}else if(type==='CHANGE_VARIABLE_TYPE'){const valueType=prompt('New nominal type','string')?.trim();if(valueType)graphMutationClient.mutate([{type,parentYamlPath:descriptor,parameterName:variable,valueType}],`Change ${variable} type`);}else if(confirm(`Delete variable ${variable}? Getter and setter nodes must be removed first.`))graphMutationClient.mutate([{type,parentYamlPath:descriptor,parameterName:variable}],`Delete ${variable}`);return;}
-  if(type==='REPLACE_NODE'){const nodeKind=prompt('Replacement node type (pins must match uniquely)',node.subtitle?.replace(/^(flow-|script-)/,'')||'message')?.trim();if(nodeKind)graphMutationClient.mutate([{type:'REPLACE_NODE',yamlPath:node.yamlPath,nodeKind}],`Replace ${node.title}`);return;}
+  if(type==='ADD_SCRIPT_PARAMETER'){if(graphCanvas.projection?.resourceKind!=='script'||!['script-input','script-output'].includes(node.kind))return;const name=(await requestText('Parameter name','value'))?.trim();if(!name)return;const valueType=(await requestText('Nominal type (for example integer, text, quest)','string'))?.trim();if(!valueType)return;const required=await requestConfirm('Require callers to provide this parameter?','Required');const defaultValue=required?null:await requestText('Inline default (leave blank for none)','');graphMutationClient.mutate([{type:'ADD_SCRIPT_PARAMETER',parentYamlPath:`${graphCanvas.projection.rootYamlPath}/${node.kind==='script-input'?'inputs':'outputs'}`,key:name,valueType,required,defaultValue:defaultValue||null}],`Add ${name} parameter`);return;}
+  if(['RENAME_VARIABLE','CHANGE_VARIABLE_TYPE','DELETE_VARIABLE'].includes(type)){const variable=node.fields?.find(field=>field.label==='variable')?.value;if(!variable){yamlStatus.textContent='This node does not identify an execution-local variable.';return;}const descriptor=explicitGraphPath(node,graphCanvas.projection);if(type==='RENAME_VARIABLE'){const newName=(await requestText('New variable name',variable))?.trim();if(newName&&newName!==variable)graphMutationClient.mutate([{type,parentYamlPath:descriptor,parameterName:variable,newName}],`Rename ${variable}`);}else if(type==='CHANGE_VARIABLE_TYPE'){const valueType=(await requestText('New nominal type','string'))?.trim();if(valueType)graphMutationClient.mutate([{type,parentYamlPath:descriptor,parameterName:variable,valueType}],`Change ${variable} type`);}else if(await requestConfirm(`Delete variable ${variable}? Getter and setter nodes must be removed first.`,'Delete'))graphMutationClient.mutate([{type,parentYamlPath:descriptor,parameterName:variable}],`Delete ${variable}`);return;}
+  if(type==='REPLACE_NODE'){const nodeKind=(await requestText('Replacement node type (pins must match uniquely)',node.subtitle?.replace(/^(flow-|script-)/,'')||'message'))?.trim();if(nodeKind)graphMutationClient.mutate([{type:'REPLACE_NODE',yamlPath:node.yamlPath,nodeKind}],`Replace ${node.title}`);return;}
   if(type==='RENAME_NODE'){renameGraphNode(node.id);return;}
   if (type === 'OPEN_REFERENCED_RESOURCE') {
     const resource = deriveResources(state.files).find(item => item.kind === node.subtitle && item.id === node.title);
@@ -968,7 +972,7 @@ function handleGraphNodeAction({ type, node }) {
     return;
   }
   if (type === 'EXTRACT_TO_SCRIPT') {
-    const scriptId = prompt('New reusable script ID', `script-${crypto.randomUUID().slice(0, 8)}`)?.trim();
+    const scriptId = (await requestText('New reusable script ID', `script-${crypto.randomUUID().slice(0, 8)}`))?.trim();
     if (!scriptId) return;
     const resource = workspaceShell.activeResource();
     const descriptor = explicitGraphPath(node, graphCanvas.projection);
@@ -986,7 +990,7 @@ function handleGraphNodeAction({ type, node }) {
     const assignment = type === 'CREATE_ASSIGN_DIALOGUE' ? 'npc-dialogue' : 'npc-player-behavior';
     const resolvedAssignment = type === 'CREATE_ASSIGN_SHARED_BEHAVIOR' ? 'npc-shared-behavior' : assignment;
     const targetKind = type === 'CREATE_ASSIGN_DIALOGUE' ? 'dialogue' : 'behavior';
-    const targetId = prompt(`New ${targetKind} ID to create and assign`, 'namespace:new-resource')?.trim();
+    const targetId = (await requestText(`New ${targetKind} ID to create and assign`, 'namespace:new-resource'))?.trim();
     if (!targetId) return;
     const resource = workspaceShell.activeResource();
     executeProjectOperation('create-and-assign', { sourcePath: resource.path, assignment: resolvedAssignment, targetId }, targetKind, targetId)
@@ -1027,16 +1031,16 @@ function handleGraphNodeAction({ type, node }) {
   }
 }
 
-function handleScriptParameterAction({ type, port, neighbor }) {
+async function handleScriptParameterAction({ type, port, neighbor }) {
   const parentYamlPath = port.yamlPath.substring(0, port.yamlPath.lastIndexOf('/'));
   if (type === 'RENAME_SCRIPT_PARAMETER') {
-    const newName = prompt(`Rename parameter ${port.label}`, port.label)?.trim();
+    const newName = (await requestText(`Rename parameter ${port.label}`, port.label))?.trim();
     if (!newName || newName === port.label) return;
     graphMutationClient.mutate([{ type, parentYamlPath, parameterName: port.label, newName }],
       `Rename parameter ${port.label}`); return;
   }
   if (type === 'CHANGE_SCRIPT_PARAMETER_TYPE') {
-    const valueType = prompt(`Nominal type for ${port.label}`, port.valueType)?.trim();
+    const valueType = (await requestText(`Nominal type for ${port.label}`, port.valueType))?.trim();
     if (!valueType || valueType === port.valueType) return;
     graphMutationClient.mutate([{ type, yamlPath: port.yamlPath, parentYamlPath, parameterName: port.label, valueType }],
       `Change ${port.label} type`); return;
@@ -1053,21 +1057,21 @@ function handleScriptParameterAction({ type, port, neighbor }) {
       && new RegExp(`(^|\\n)\\s*${port.label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*:`).test(content)).length;
     const wires = (graphCanvas.projection?.edges || []).filter(edge =>
       edge.sourcePinId === port.id || edge.targetPinId === port.id).length;
-    if (!confirm(`Delete parameter ${port.label}? Preview: ${wires} local connection${wires === 1 ? '' : 's'} and bindings in ${callFiles} caller file${callFiles === 1 ? '' : 's'} will be removed atomically.`)) return;
+    if (!await requestConfirm(`Delete parameter ${port.label}? Preview: ${wires} local connection${wires === 1 ? '' : 's'} and bindings in ${callFiles} caller file${callFiles === 1 ? '' : 's'} will be removed atomically.`, 'Delete')) return;
     graphMutationClient.mutate([{ type, parentYamlPath, parameterName: port.label }], `Delete parameter ${port.label}`);
   }
 }
 
-function promotePinToVariable(pin) {
+async function promotePinToVariable(pin) {
   if (!pin || pin.channel !== 'DATA') return;
-  const name = prompt('Variable name', String(pin.label || 'value').toLowerCase().replace(/[^a-z0-9_.-]+/g, '-'))?.trim();
+  const name = (await requestText('Variable name', String(pin.label || 'value').toLowerCase().replace(/[^a-z0-9_.-]+/g, '-')))?.trim();
   if (!name) return;
   if (!/^[a-z0-9][a-z0-9_.-]{0,127}$/.test(name)) {
     yamlStatus.textContent = 'Variable names use lowercase letters, digits, dot, underscore, and hyphen.'; return;
   }
   const incoming = (graphCanvas.projection?.edges || []).filter(edge => edge.targetPinId === pin.id);
   if (String(pin.direction).toUpperCase() === 'INPUT' && incoming.length
-      && !confirm(`Replace ${incoming.length} existing input link${incoming.length === 1 ? '' : 's'} with a getter for ${name}?`)) return;
+      && !await requestConfirm(`Replace ${incoming.length} existing input link${incoming.length === 1 ? '' : 's'} with a getter for ${name}?`, 'Replace')) return;
   const operations = incoming.map(edge => ({ type: 'DISCONNECT', edgeId: edge.id }));
   operations.push({ type: 'PROMOTE_TO_VARIABLE', key: name,
     [String(pin.direction).toUpperCase() === 'OUTPUT' ? 'sourcePinId' : 'targetPinId']: pin.id });
@@ -1113,7 +1117,7 @@ async function applyStructure(operation, path, targetPath) {
   }
   yamlStatus.textContent = `Unsupported structural graph command: ${operation}`;
 }
-async function extractSubtree(path){if(!state.connected)return;const behaviorId=prompt('New namespaced subtree behavior ID','namespace:subtree');if(!behaviorId)return;const scope=state.documentModels.get(state.selected)?.root?.children?.find(child=>child.key==='scope')?.value||'player';let filename;try{filename=await requestSafePath('behavior',behaviorId);}catch(error){yamlStatus.textContent=`Cannot extract: ${error.message}`;return;}if(state.files.has(filename)){yamlStatus.textContent=`Cannot extract: ${filename} already exists.`;return;}recordHistory();try{const response=await fetch(sessionApi('/documents/extract-subtree'),{method:'POST',headers:authorizedHeaders({'Content-Type':'application/json'}),body:JSON.stringify({content:source.value,path,behaviorId,scope})});if(!response.ok)throw new Error(await response.text()||`HTTP ${response.status}`);const result=await response.json();source.value=result.source.content;state.files.set(state.selected,result.source.content);state.documentModels.set(state.selected,result.source);state.files.set(filename,result.extractedContent);renderDocument(result.source);refreshDirty();scheduleAutosave();scheduleRecovery();refreshProjectReferences();const resource=deriveResources(state.files).find(item=>item.kind==='behavior'&&item.id===behaviorId);if(resource)workspaceShell.openResource(resource);}catch(error){state.histories.get(state.selected)?.undo.pop();yamlStatus.textContent=`Subtree extraction rejected: ${error.message}`;}}
+async function extractSubtree(path){if(!state.connected)return;const behaviorId=await requestText('New namespaced subtree behavior ID','namespace:subtree');if(!behaviorId)return;const scope=state.documentModels.get(state.selected)?.root?.children?.find(child=>child.key==='scope')?.value||'player';let filename;try{filename=await requestSafePath('behavior',behaviorId);}catch(error){yamlStatus.textContent=`Cannot extract: ${error.message}`;return;}if(state.files.has(filename)){yamlStatus.textContent=`Cannot extract: ${filename} already exists.`;return;}recordHistory();try{const response=await fetch(sessionApi('/documents/extract-subtree'),{method:'POST',headers:authorizedHeaders({'Content-Type':'application/json'}),body:JSON.stringify({content:source.value,path,behaviorId,scope})});if(!response.ok)throw new Error(await response.text()||`HTTP ${response.status}`);const result=await response.json();source.value=result.source.content;state.files.set(state.selected,result.source.content);state.documentModels.set(state.selected,result.source);state.files.set(filename,result.extractedContent);renderDocument(result.source);refreshDirty();scheduleAutosave();scheduleRecovery();refreshProjectReferences();const resource=deriveResources(state.files).find(item=>item.kind==='behavior'&&item.id===behaviorId);if(resource)workspaceShell.openResource(resource);}catch(error){state.histories.get(state.selected)?.undo.pop();yamlStatus.textContent=`Subtree extraction rejected: ${error.message}`;}}
 
 function refreshDirty() {
   flushSelected();
@@ -1944,7 +1948,7 @@ function kindForFolder(folder) {
 }
 
 async function createProjectFolder(parent) {
-  const segment = prompt(`New folder beneath ${parent}:`, 'new-folder');
+  const segment = await requestText(`New folder beneath ${parent}:`, 'new-folder');
   if (!segment) return;
   try {
     const folder = `${parent}/${segment}`;
@@ -1956,7 +1960,7 @@ async function createProjectFolder(parent) {
 async function moveProjectFolder(folder, destination = null) {
   const basename = folder.split('/').at(-1);
   const replacementFolder = destination ? `${destination}/${basename}`
-    : prompt(`Move or rename ${folder} to:`, folder);
+    : await requestText(`Move or rename ${folder} to:`, folder);
   if (!replacementFolder || replacementFolder === folder) return;
   try {
     await executeProjectOperation('folders/move', { folder, replacementFolder,
@@ -1977,7 +1981,7 @@ async function deleteProjectFolder(folder) {
     if (!previewResponse.ok) throw new Error(preview.message || `HTTP ${previewResponse.status}`);
     if (preview.blockingReferences?.length) throw new Error(`Blocked by ${preview.blockingReferences.length} external inbound reference(s).`);
     const resources = preview.resources.length ? `\n\n${preview.resources.join('\n')}` : '\n\nThe folder is empty.';
-    if (!confirm(`Delete ${folder} and ${preview.resources.length} contained resource file(s)?${resources}`)) return;
+    if (!await requestConfirm(`Delete ${folder} and ${preview.resources.length} contained resource file(s)?${resources}`, 'Delete folder')) return;
     await executeProjectOperation('folders/delete', { folder, expectedManifestDigest: preview.manifestDigest });
   } catch (error) { status.textContent = `Folder deletion failed: ${error.message}`; }
 }
@@ -1990,7 +1994,7 @@ async function moveResourceToFolder(resource, folder) {
 }
 
 async function copyResourceToFolder(resource, folder) {
-  const replacementId = prompt(`Copy ${resource.id} into ${folder} with new ID:`, `${resource.id}-copy`);
+  const replacementId = await requestText(`Copy ${resource.id} into ${folder} with new ID:`, `${resource.id}-copy`);
   if (!replacementId) return;
   try {
     const safe = await requestSafePath(resource.kind, replacementId);
@@ -2010,14 +2014,14 @@ async function requestSafePath(kind, id) {
 
 duplicateResourceButton.addEventListener('click', async () => {
   const resource = workspaceShell.activeResource(); if (!resource || duplicateResourceButton.disabled) return;
-  const replacementId = prompt(`Duplicate ${resource.kind} ${resource.id} as:`, resource.kind === 'script' ? `${resource.id}-copy` : `${resource.id}-copy`);
+  const replacementId = await requestText(`Duplicate ${resource.kind} ${resource.id} as:`, `${resource.id}-copy`);
   if (!replacementId) return;
   try {
     const outbound = state.referenceGraph.references.filter(reference => reference.sourceType === resource.kind
       && reference.sourceId === resource.id);
     const preview = outbound.length ? outbound.map(reference =>
       `${reference.targetType}:${reference.targetId} (${reference.path}${reference.yamlPath})`).join('\n') : 'No typed outbound references.';
-    if (!confirm(`Create the lossless copy ${replacementId}? References in the copy remain pointed at the original targets:\n\n${preview}`)) return;
+    if (!await requestConfirm(`Create the lossless copy ${replacementId}? References in the copy remain pointed at the original targets:\n\n${preview}`, 'Create copy')) return;
     const replacementPath = await requestSafePath(resource.kind, replacementId);
     await executeProjectOperation('duplicate', { kind: resource.kind, sourceId: resource.id, replacementId, replacementPath }, resource.kind, replacementId);
   } catch (error) { status.textContent = `Duplicate failed: ${error.message}`; }
@@ -2025,7 +2029,7 @@ duplicateResourceButton.addEventListener('click', async () => {
 
 renameResourceButton.addEventListener('click', async () => {
   const resource = workspaceShell.activeResource(); if (!resource || renameResourceButton.disabled) return;
-  const replacementId = prompt(`Rename ${resource.kind} ${resource.id} and all typed references to:`, resource.id);
+  const replacementId = await requestText(`Rename ${resource.kind} ${resource.id} and all typed references to:`, resource.id);
   if (!replacementId || replacementId === resource.id) return;
   try {
     const files = await contentFiles();
@@ -2036,8 +2040,8 @@ renameResourceButton.addEventListener('click', async () => {
     const preview = await previewResponse.json();
     if (!previewResponse.ok || !preview.safe) throw new Error(preview.conflicts?.join(' ') || preview.message || `HTTP ${previewResponse.status}`);
     const summary = preview.occurrences.map(item => `${item.role}: ${item.path}:${item.line} ${item.yamlPath}`).join('\n');
-    if (!confirm(`Apply this atomic rename?\n\n${summary}`)) return;
-    const renameFile = confirm('Also rename the file while keeping it in this folder?');
+    if (!await requestConfirm(`Apply this atomic rename?\n\n${summary}`, 'Rename')) return;
+    const renameFile = await requestConfirm('Also rename the file while keeping it in this folder?', 'Rename file');
     const safePath = renameFile ? await requestSafePath(resource.kind, replacementId) : resource.path;
     const replacementPath = renameFile ? `${resource.folder}/${safePath.split('/').at(-1)}` : resource.path;
     await executeProjectOperation('rename', { kind: resource.kind, currentId: resource.id, replacementId, renameFile, replacementPath }, resource.kind, replacementId);
@@ -2048,12 +2052,12 @@ moveResourceButton.addEventListener('click', async () => {
   const resource = workspaceShell.activeResource(); if (!resource || moveResourceButton.disabled) return;
   try {
     const suggested = `${workspaceShell.selectedFolder}/${resource.path.split('/').at(-1)}`;
-    const replacementPath = prompt('Validated destination path beneath the same kind root:', suggested);
+    const replacementPath = await requestText('Validated destination path beneath the same kind root:', suggested);
     if (!replacementPath) return;
     if (replacementPath === resource.path) {
       status.textContent = `${resource.id} already uses that path.`; return;
     }
-    if (!confirm(`Move ${resource.id} from ${resource.path} to ${replacementPath}? The file bytes will not change.`)) return;
+    if (!await requestConfirm(`Move ${resource.id} from ${resource.path} to ${replacementPath}? The file bytes will not change.`, 'Move')) return;
     await executeProjectOperation('move', { kind: resource.kind, id: resource.id, replacementPath }, resource.kind, resource.id);
   } catch (error) { status.textContent = `Move failed: ${error.message}`; }
 });
@@ -2067,7 +2071,7 @@ deleteResourceButton.addEventListener('click', async () => {
     status.textContent = `Delete blocked: ${inbound.length} typed caller${inbound.length === 1 ? '' : 's'}. Use the caller buttons to navigate.`;
     return;
   }
-  if (!confirm(`Delete ${resource.kind} ${resource.id}? Deletion is blocked when typed inbound references exist.`)) return;
+  if (!await requestConfirm(`Delete ${resource.kind} ${resource.id}? Deletion is blocked when typed inbound references exist.`, 'Delete')) return;
   try { await executeProjectOperation('delete', { kind: resource.kind, id: resource.id }, null, null); }
   catch (error) { status.textContent = `Delete failed: ${error.message}`; }
 });
@@ -2197,7 +2201,8 @@ function paletteNodeCategory(definition) {
   if (definition.extensionType || definition.nodeKind.startsWith('extension-')) return 'Extensions';
   if (['sequence', 'branch', 'choice', 'switch', 'random', 'gate', 'do-once', 'do-n', 'for', 'for-each', 'while',
     'selector', 'priority-selector', 'parallel'].includes(definition.nodeKind)) return 'Flow Control';
-  if (definition.nodeKind.startsWith('get-') || definition.nodeKind.includes('-to-') || definition.nodeKind === 'to-string') return 'Values';
+  if (definition.nodeKind.startsWith('get-') || definition.nodeKind.includes('-to-') || definition.nodeKind === 'to-string'
+      || ['equals','not-equals','greater-than','greater-than-or-equal','less-than','less-than-or-equal','and','or','not'].includes(definition.nodeKind)) return 'Values';
   if (['dialogue-entry', 'quest-phase', 'quest-objective', 'npc-anchor'].includes(definition.nodeKind)) return 'Structure';
   if (definition.nodeKind.includes('behavior') || definition.nodeKind.includes('dialogue') || definition.nodeKind.includes('quest')) return 'References';
   return 'Actions';
@@ -2209,7 +2214,7 @@ function paletteSearchText(definition) {
 }
 
 function graphNodeDefinitions() {
-  return nodeDefinitions(graphCanvas.projection?.resourceKind, state.editorSchemas.values());
+  return nodeDefinitions(graphCanvas.projection?.resourceKind, state.editorSchemas.values(), paletteContext.sourcePin?.valueType || 'string');
 }
 
 function graphNodeByPin(pin) {

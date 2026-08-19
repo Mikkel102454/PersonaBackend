@@ -1,5 +1,5 @@
 /** Data-only node registry shared by the toolbar, command palette, and pin-drop palette. */
-export function nodeDefinitions(kind, schemas = []) {
+export function nodeDefinitions(kind, schemas = [], preferredValueType = 'string') {
   const extensions = [...schemas];
   if (kind === 'behavior') return [
     ['Sequence', 'sequence'], ['Selector', 'selector'], ['Priority selector', 'priority-selector'],
@@ -14,20 +14,20 @@ export function nodeDefinitions(kind, schemas = []) {
         extensionType: schema.typeId })));
   if (kind === 'dialogue') return [
     { label: 'Dialogue entry', nodeKind: 'dialogue-entry', inputType: 'dialogue-flow', requiresKey: true, destination: 'root' },
-    ...commonGraphDefinitions(true),
+    ...commonGraphDefinitions(true, preferredValueType),
     ...extensionCommands(extensions, 'Extension') ];
   if (kind === 'quest') return [
     { label: 'Quest phase', nodeKind: 'quest-phase', inputType: 'quest-phase-flow', inputTypes: ['quest-phase-flow', 'phase-flow'], requiresKey: true, destination: 'root' },
     { label: 'Wait objective', nodeKind: 'quest-objective', inputType: 'quest-objective', inputTypes: ['quest-objective', 'objective'], requiresKey: true, destination: 'objectives' },
     ...extensions.filter(schema => schema.contentType === 'objective').map(schema => ({ label: `Extension · ${schema.typeId}`,
       nodeKind: 'extension-objective', inputType: 'quest-objective', inputTypes: ['quest-objective', 'objective'], requiresKey: true, destination: 'objectives', extensionType: schema.typeId })),
-    ...commonGraphDefinitions(false),
+    ...commonGraphDefinitions(false, preferredValueType),
     ...extensionCommands(extensions, 'Quest lifecycle extension') ];
   if (kind === 'npc') return [
     { label: 'NPC anchor', nodeKind: 'npc-anchor', inputType: 'anchor', requiresKey: true, destination: 'anchors' },
-    ...commonGraphDefinitions(false),
+    ...commonGraphDefinitions(false, preferredValueType),
     ...extensionCommands(extensions, 'NPC interaction extension') ];
-  if (kind === 'script') return commonGraphDefinitions(false).concat([
+  if (kind === 'script') return commonGraphDefinitions(false, preferredValueType).concat([
     { label: 'Convert integer to number', nodeKind: 'integer-to-number', inputType: 'data:integer', targetPinLabel: 'value', destination: 'graph' },
     { label: 'Convert string to text', nodeKind: 'string-to-text', inputType: 'data:string', targetPinLabel: 'value', destination: 'graph' },
     ...['boolean', 'integer', 'number', 'world', 'material', 'entity-type', 'sound', 'particle', 'npc',
@@ -90,7 +90,7 @@ export function yamlMappingKeys(content) {
   return keys;
 }
 
-function commonGraphDefinitions(dialogue) {
+function commonGraphDefinitions(dialogue, preferredValueType) {
   const execution = [
     ['Say line', 'say'], ['Wait', 'wait'], ['Boolean branch', 'branch'], ['Choice', 'choice'],
     ['Sequence', 'sequence'], ['Switch', 'switch'], ['Random branch', 'random'], ['Gate', 'gate'],
@@ -107,8 +107,33 @@ function commonGraphDefinitions(dialogue) {
       { label: 'Get player string', nodeKind: 'get-player-string', inputType: null, destination: 'graph' },
       { label: 'Set player string', nodeKind: 'set-player-string', inputType: 'execution', targetPinLabel: 'exec', destination: 'graph' },
       { label: 'Convert integer to number', nodeKind: 'integer-to-number', inputType: 'data:integer', targetPinLabel: 'value', destination: 'graph' },
-      { label: 'Convert string to text', nodeKind: 'string-to-text', inputType: 'data:string', targetPinLabel: 'value', destination: 'graph' }
+      { label: 'Convert string to text', nodeKind: 'string-to-text', inputType: 'data:string', targetPinLabel: 'value', destination: 'graph' },
+      ...operatorDefinitions(preferredValueType)
     ]).map(withKnownInputs);
+}
+
+function operatorDefinitions(valueType = 'string') {
+  const type = String(valueType || 'string');
+  const comparisons = [
+    { label: 'Equal (==)', nodeKind: 'equals', keywords: ['comparison', '=='] },
+    { label: 'Not equal (!=)', nodeKind: 'not-equals', keywords: ['comparison', '!='] },
+    ...(['integer', 'number', 'duration', 'string', 'text'].includes(type) ? [
+      { label: 'Greater than (>)', nodeKind: 'greater-than', keywords: ['comparison', '>'] },
+      { label: 'Greater than or equal (>=)', nodeKind: 'greater-than-or-equal', keywords: ['comparison', '>='] },
+      { label: 'Less than (<)', nodeKind: 'less-than', keywords: ['comparison', '<'] },
+      { label: 'Less than or equal (<=)', nodeKind: 'less-than-or-equal', keywords: ['comparison', '<='] }
+    ] : [])
+  ].map(definition => ({ ...definition, destination: 'graph', valueType: type,
+    inputType: `data:${type}`, targetPinLabel: 'left', inputPins: [
+      { semanticType: `data:${type}`, label: 'left' }, { semanticType: `data:${type}`, label: 'right' }
+    ] }));
+  const logical = [
+    { label: 'AND (&&)', nodeKind: 'and', pinLabels: ['left', 'right'], keywords: ['logical', '&&'] },
+    { label: 'OR (||)', nodeKind: 'or', pinLabels: ['left', 'right'], keywords: ['logical', '||'] },
+    { label: 'NOT (!)', nodeKind: 'not', pinLabels: ['value'], keywords: ['logical', '!'] }
+  ].map(definition => ({ ...definition, destination: 'graph', inputType: 'data:boolean',
+    targetPinLabel: definition.pinLabels[0], inputPins: definition.pinLabels.map(label => ({ semanticType: 'data:boolean', label })) }));
+  return [...comparisons, ...logical];
 }
 
 const KNOWN_DATA_INPUTS = {
@@ -153,7 +178,7 @@ function withKnownInputs(definition) {
     ...(KNOWN_DATA_INPUTS[definition.nodeKind] || [])];
   const data = knownData
     .map(([valueType, label]) => ({ semanticType: `data:${valueType}`, label }));
-  const inputPins = [...declared, ...data].filter((input, index, values) =>
+  const inputPins = [...(definition.inputPins || []), ...declared, ...data].filter((input, index, values) =>
     values.findIndex(value => value.semanticType === input.semanticType && value.label === input.label) === index);
   return { ...definition, inputPins, inputTypes: [...new Set(inputPins.map(input => input.semanticType))] };
 }

@@ -64,8 +64,6 @@ export class GraphInspector {
         : 'This node has no scalar properties at this level.'; properties.append(empty);
     }
     fragment.append(properties);
-    fragment.append(this.portsSection(node, projection));
-    fragment.append(this.connectionsSection(node, projection));
     const issues = (projection?.diagnostics || []).filter(issue => issue.nodeId === node.id
       || issue.yamlPath && node.yamlPath && (issue.yamlPath === node.yamlPath || issue.yamlPath.startsWith(node.yamlPath + '/')));
     fragment.append(this.itemsSection('Validation', issues, issue => `${issue.severity || 'issue'}: ${issue.message}`,
@@ -77,11 +75,6 @@ export class GraphInspector {
     const live = liveNodeKeys?.has?.(node.title) || liveNodeKeys?.has?.(node.yamlPath);
     fragment.append(this.itemsSection('Live', live ? ['This node is active in the trusted read-only live overlay.'] : [],
       value => value, 'No active live state for this selection.'));
-    const metadata = this.section('Metadata');
-    const values = [`Node ID: ${node.id}`, `Kind: ${node.kind}`, `Resource: ${projection?.resourceIdentity || 'unknown'}`,
-      `Source: ${node.range ? `${node.range.startLine}:${node.range.startColumn}–${node.range.endLine}:${node.range.endColumn}` : 'synthetic'}`];
-    for (const value of values) { const line = document.createElement('code'); line.textContent = value; metadata.append(line); }
-    fragment.append(metadata);
     this.content.replaceChildren(fragment);
   }
 
